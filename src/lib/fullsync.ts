@@ -153,22 +153,31 @@ function buildFullRestrictions(property: Property, ratePlans: RatePlan[], ari: A
     for (let i = 0; i < FULL_SYNC_DAYS; i++) {
       const date = addDays(start, i);
       const row = byKey.get([plan.id, date].join("|"));
-      if (!row || row.rate === null || row.rate === undefined) {
-        // No rate means nothing sellable to state for that date, and Channex
-        // reject a value object with no restriction in it.
+      if (!row) {
+        // Nothing at all for this date. Breaking the span here is what left the
+        // last date_to differing between rate plans, which Channex read as an
+        // unaligned full sync, so it is worth knowing that is the only case.
         span = null;
         continue;
       }
 
-      const payload = compact({
-        rate: Number(row.rate).toFixed(2),
-        min_stay_through: row.min_stay_through,
-        min_stay_arrival: row.min_stay_arrival,
-        max_stay: row.max_stay,
-        closed_to_arrival: row.closed_to_arrival,
-        closed_to_departure: row.closed_to_departure,
-        stop_sell: row.stop_sell,
-      }) as Record<string, unknown>;
+      // A full sync states the whole world, so every restriction the property
+      // declares support for is sent explicitly. Leaving one out because it
+      // happens to be null reads to Channex as "declared but never sent", which
+      // is exactly what they rejected the first submission for.
+      const payload: Record<string, unknown> = {
+        min_stay_through: row.min_stay_through ?? 1,
+        min_stay_arrival: row.min_stay_arrival ?? 1,
+        max_stay: row.max_stay ?? 0,
+        closed_to_arrival: row.closed_to_arrival ?? false,
+        closed_to_departure: row.closed_to_departure ?? false,
+        stop_sell: row.stop_sell ?? false,
+      };
+      // A rate plan with no price for a date still has restrictions worth
+      // stating, and omitting only the rate keeps the date range unbroken.
+      if (row.rate !== null && row.rate !== undefined) {
+        payload.rate = Number(row.rate).toFixed(2);
+      }
 
       const signature = JSON.stringify(payload);
       if (span && span.signature === signature) {

@@ -20,6 +20,8 @@ type OutboxRow = {
   room_type_id: string | null;
   rate_plan_id: string | null;
   date: string;
+  /** Which fields actually changed. Written by the ari_enqueue trigger. */
+  fields: string[] | null;
 };
 
 /** Every restriction field that travels on a rate plan, in the order Channex name them. */
@@ -291,7 +293,23 @@ export function buildRestrictionValues(
     if (seen.has(dedupe)) continue;
     seen.add(dedupe);
 
-    const payload = compact({
+    // Only the fields that actually changed. Sending the whole cell is what
+    // Channex rejected: a rate change arrived carrying min stay, stop sell and
+    // closed to arrival, and the unrelated fields differing day to day also
+    // stopped consecutive dates merging into a date range.
+    //
+    // Rows for the same cell are collected first, because one save can change a
+    // rate and a restriction together and that is still one value object.
+    const changed = new Set<string>();
+    for (const other of rows) {
+      if (other.rate_plan_id !== row.rate_plan_id || other.date !== row.date) continue;
+      for (const f of other.fields ?? []) changed.add(f);
+    }
+    // Nothing recorded means a delta from before the trigger tracked fields.
+    // Falling back to everything set on the cell keeps those drainable.
+    const wanted = changed.size > 0 ? changed : new Set(RESTRICTION_FIELDS as readonly string[]);
+
+    const source: Record<string, unknown> = {
       rate: cell.rate === null || cell.rate === undefined ? null : Number(cell.rate).toFixed(2),
       min_stay_through: cell.min_stay_through,
       min_stay_arrival: cell.min_stay_arrival,
@@ -299,11 +317,23 @@ export function buildRestrictionValues(
       closed_to_arrival: cell.closed_to_arrival,
       closed_to_departure: cell.closed_to_departure,
       stop_sell: cell.stop_sell,
-    }) as RestrictionValue;
+    };
+    const payload: RestrictionValue = {};
+    for (const field of RESTRICTION_FIELDS) {
+      if (!wanted.has(field)) continue;
+      const value = source[field];
+      // A cleared restriction still has to be stated, or the far side keeps the
+      // old value. Channex reject nulls, so a cleared field sends its neutral
+      // value rather than nothing.
+      if (value === null || value === undefined) {
+        if (field === "rate") continue;
+        payload[field] = field === "max_stay" ? 0 : field.startsWith("min_stay") ? 1 : false;
+        continue;
+      }
+      payload[field] = value;
+    }
 
     if (Object.keys(payload).length === 0) {
-      // Every restriction was cleared. Channex reject nulls, so there is nothing
-      // to say about this date and the delta is dropped rather than sent empty.
       unmapped.push(row.id);
       continue;
     }
@@ -338,5 +368,8 @@ export function buildRestrictionValues(
 }
 
 function signatureOf(payload: RestrictionValue): string {
-  return RESTRICTION_FIELDS.map((f) => `${f}=${String(payload[f] ?? "")}`).join(";");
+  // Which fields are present matters as much as their values: two dates only
+  // merge into one range when they carry the same fields as well as the same
+  // numbers.
+  return RESTRICTION_FIELDS.map((f) => (f in payload ? `${f}=${String(payload[f])}` : `${f}:absent`)).join(";");
 }
