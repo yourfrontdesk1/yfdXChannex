@@ -162,6 +162,12 @@ if (withRates) {
         min_stay_through: minStay,
         stop_sell: avail === 0,
         closed_to_arrival: minStay > 1 && jitter(date, "cta") < 0.1,
+        // Written explicitly rather than left alone. A seed that skips a field
+        // leaves whatever a previous run set, and the change detection then
+        // correctly finds nothing to send, so a scenario silently stops
+        // exercising that restriction on its second run.
+        max_stay: null,
+        closed_to_departure: null,
       });
     }
   }

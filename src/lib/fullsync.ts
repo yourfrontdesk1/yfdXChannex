@@ -53,9 +53,33 @@ export async function fullSync(propertyId: string, opts: { force?: boolean } = {
   const start = today();
   const end = addDays(start, FULL_SYNC_DAYS - 1);
 
-  const [{ data: roomTypeRows }, { data: ariRows }] = await Promise.all([
+  // PostgREST caps a select at 1000 rows unless you page through it. A property
+  // with four rate plans over 500 days is three thousand rows, so an unpaged
+  // read silently covered about 165 days and the ranges stopped at different
+  // dates per rate plan. Channex read exactly that as an unaligned full sync.
+  async function allAri(): Promise<AriRow[]> {
+    const page = 1000;
+    const out: AriRow[] = [];
+    for (let from = 0; ; from += page) {
+      const { data, error } = await supabase
+        .from("ari")
+        .select("*")
+        .eq("property_id", propertyId)
+        .gte("date", start)
+        .lte("date", end)
+        .order("date")
+        .order("room_type_id")
+        .range(from, from + page - 1);
+      if (error) throw new Error(`ari: ${error.message}`);
+      const rows = (data ?? []) as AriRow[];
+      out.push(...rows);
+      if (rows.length < page) return out;
+    }
+  }
+
+  const [{ data: roomTypeRows }, ariRows] = await Promise.all([
     supabase.from("room_types").select("*").eq("property_id", propertyId).order("sort"),
-    supabase.from("ari").select("*").eq("property_id", propertyId).gte("date", start).lte("date", end),
+    allAri(),
   ]);
 
   const roomTypes = (roomTypeRows ?? []) as RoomType[];
@@ -63,7 +87,7 @@ export async function fullSync(propertyId: string, opts: { force?: boolean } = {
     ? await supabase.from("rate_plans").select("*").in("room_type_id", roomTypes.map((r) => r.id))
     : { data: [] as RatePlan[] };
   const ratePlans = (ratePlanRows ?? []) as RatePlan[];
-  const ari = (ariRows ?? []) as AriRow[];
+  const ari = ariRows;
 
   const availabilityValues = buildFullAvailability(property, roomTypes, ari, start);
   const restrictionValues = buildFullRestrictions(property, ratePlans, ari, start);
