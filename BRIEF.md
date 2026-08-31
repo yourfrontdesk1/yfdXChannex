@@ -112,5 +112,11 @@ open, which makes it the right pilot: nothing to lose if a push goes wrong.
 
 ## State
 
-Schema written (`db/001_schema.sql`). Nothing else built. Nothing connected to
-Channex. Staging API key exists on Leon's Channex staging account.
+**31 Aug 2026: certification form submitted.** Stage 3 of 5. All eleven test
+scenarios passed, each as a single API call, against the dedicated test property
+Channex require. Awaiting their review and the stage 4 screenshare.
+
+Everything in the build order below is built and has run: schema, ARI store,
+rate grid, outbox, worker, booking ingest with acknowledgement, full sync and
+provisioning. See `CERTIFICATION.md` for the run log, task ids and the answers
+submitted.
