@@ -31,17 +31,17 @@ as **exactly one API call**, which is what the scenarios saying "this should be
 
 | Test | Scenario | Endpoint | Values | Task id |
 |---|---|---|---|---|
-| 1 | Full sync, 500 days | `/availability` | 259 | `9fadd9d1-8a46-4286-9dc9-7b35e3a37924` |
-| 1 | Full sync, 500 days | `/restrictions` | 634 | `963754a1-ed19-402c-8293-024bb651556a` |
-| 2 | Single date, single rate | `/restrictions` | 1 | `f83838d8-432e-4a6d-94cf-178a991636d9` |
-| 3 | Single date, multiple rates | `/restrictions` | 3 | `91fda013-c7a3-41b1-93e5-5a76ae831fdd` |
-| 4 | Multiple dates, multiple rates | `/restrictions` | 3 | `1018371b-165a-443b-b8d3-acb15abc4169` |
-| 5 | Min stay | `/restrictions` | 3 | `8b66126c-7ca0-47ba-9653-27d126a406e6` |
-| 6 | Stop sell | `/restrictions` | 2 | `14882a5d-ffcf-4377-a5da-c284faaa6182` |
-| 7 | Multiple restrictions | `/restrictions` | 4 | `149afcbd-c81d-4f7d-9f85-740b5b873968` |
-| 8 | Half year, Dec 2026 to May 2027 | `/restrictions` | 2 | `14f55d90-4f55-416d-a117-a500df4c8cfe` |
-| 9 | Single date availability | `/availability` | 2 | `67a2449e-d647-4f8c-98a1-38ad87d39b09` |
-| 10 | Multiple date availability | `/availability` | 5 | `b345139e-6573-498b-9f69-ad6997fa6548` |
+| 1 | Full sync, 500 days | `/availability` | 750 | `5e22c7c4-f4a2-4b2d-aa73-3c082f2d42d3` |
+| 1 | Full sync, 500 days | `/restrictions` | 1924 | `f5c06549-6dc9-47ab-a03e-7c5e9114b0a3` |
+| 2 | Single date, single rate | `/restrictions` | 1 | `6e4d2367-09b4-4aee-a7f0-355fa606f2b6` |
+| 3 | Single date, multiple rates | `/restrictions` | 3 | `55e86894-89ed-477b-bc84-fe4a55784f6b` |
+| 4 | Multiple dates, multiple rates | `/restrictions` | 3 | `6f123340-4e7f-4d91-80fa-758f79c080e2` |
+| 5 | Min stay | `/restrictions` | 3 | `059724ba-17ef-4c0a-a1c2-304bc0a13360` |
+| 6 | Stop sell | `/restrictions` | 2 | `bab279b4-35fa-4b3a-8a64-baccfdd3554d` |
+| 7 | Multiple restrictions | `/restrictions` | 4 | `f8d8a9ad-06d4-452e-8519-84bef2f48753` |
+| 8 | Half year, Dec 2026 to May 2027 | `/restrictions` | 2 | `001c8edf-1f15-483b-9553-0cbbfa95a325` |
+| 9 | Single date availability | `/availability` | 2 | `0dac7113-b8f5-4ce0-a230-b47ae5dc2ea7` |
+| 10 | Multiple date availability | `/availability` | 5 | `1fbb9059-d649-44db-83fb-a32d6a64f5ff` |
 | 11 | Booking receive, modify, cancel | feed + ack | 3 revisions | passed first time, ids below |
 
 ### Test 11 ids
