@@ -72,7 +72,7 @@ create table if not exists ari (
   closed_to_departure boolean,
   stop_sell boolean,
   updated_at timestamptz not null default now(),
-  unique (room_type_id, rate_plan_id, date)
+  unique nulls not distinct (room_type_id, rate_plan_id, date)
 );
 create index if not exists ari_property_date_idx on ari(property_id, date);
 create index if not exists ari_rate_plan_date_idx on ari(rate_plan_id, date);
@@ -137,27 +137,56 @@ create index if not exists channex_log_at_idx on channex_log(at desc);
 -- Enqueue a delta whenever a cell changes. This is the change detection the
 -- certification pre-flight asks for: it fires on write, not on a poll.
 create or replace function ari_enqueue() returns trigger as $$
+declare
+  changed boolean;
 begin
-  if (tg_op = 'INSERT') or (new.availability is distinct from old.availability) then
+  new.updated_at := now();
+
+  if tg_op = 'INSERT' then
+    insert into outbox (property_id, kind, room_type_id, rate_plan_id, date)
+    values (new.property_id, 'availability', new.room_type_id, null, new.date);
+
+    if new.rate is not null then
+      insert into outbox (property_id, kind, room_type_id, rate_plan_id, date)
+      values (new.property_id, 'rate', new.room_type_id, new.rate_plan_id, new.date);
+    end if;
+
+    if new.min_stay is not null
+       or new.min_stay_arrival is not null
+       or new.max_stay is not null
+       or new.closed_to_arrival is not null
+       or new.closed_to_departure is not null
+       or new.stop_sell is not null then
+      insert into outbox (property_id, kind, room_type_id, rate_plan_id, date)
+      values (new.property_id, 'restriction', new.room_type_id, new.rate_plan_id, new.date);
+    end if;
+
+    return new;
+  end if;
+
+  if new.availability is distinct from old.availability then
     insert into outbox (property_id, kind, room_type_id, rate_plan_id, date)
     values (new.property_id, 'availability', new.room_type_id, null, new.date);
   end if;
-  if (tg_op = 'INSERT' and new.rate is not null) or (new.rate is distinct from old.rate) then
+
+  if new.rate is distinct from old.rate then
     insert into outbox (property_id, kind, room_type_id, rate_plan_id, date)
     values (new.property_id, 'rate', new.room_type_id, new.rate_plan_id, new.date);
   end if;
-  if (tg_op = 'UPDATE') and (
+
+  changed :=
        new.min_stay is distinct from old.min_stay
     or new.min_stay_arrival is distinct from old.min_stay_arrival
     or new.max_stay is distinct from old.max_stay
     or new.closed_to_arrival is distinct from old.closed_to_arrival
     or new.closed_to_departure is distinct from old.closed_to_departure
-    or new.stop_sell is distinct from old.stop_sell
-  ) then
+    or new.stop_sell is distinct from old.stop_sell;
+
+  if changed then
     insert into outbox (property_id, kind, room_type_id, rate_plan_id, date)
     values (new.property_id, 'restriction', new.room_type_id, new.rate_plan_id, new.date);
   end if;
-  new.updated_at := now();
+
   return new;
 end $$ language plpgsql;
 

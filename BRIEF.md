@@ -91,11 +91,11 @@ open, which makes it the right pilot: nothing to lose if a push goes wrong.
   - `1717679004` Studio Apartment, 3 units, GBP 92, sleeps 2 (3.17A, 4.17A, 8.17A)
   - `1717679003` Executive Studio, 5 units, GBP 98, sleeps 3 (1.11, 2.05, 7.08, 7.18, 9.17B)
   - `1717679001` One-Bedroom Apartment, 3 units, GBP 99, sleeps 4 (1.14, 3.17B, 4.17B)
+  - Confirmed 31 Aug 2026: 3.17B and 4.17B are one beds. The VS portal had them
+    as executive studios and has been corrected.
   - `1717679002` Two-Bedroom Apartment, 1 unit, GBP 120, sleeps 5 (2.17)
 - Rates above are the achieved ADR these same apartments made on the main listing
   over the 90 days to 31 Aug 2026, not guesses.
-- Open question: 3.17B and 4.17B are `executive_studio` in the VS portal but Leon
-  says one bed. Unresolved, and it changes rate and occupancy.
 - The main Victory Suites listing (2,564 bookings, GBP 598k a quarter) does NOT move
   here until Parkside has run clean for weeks.
 
