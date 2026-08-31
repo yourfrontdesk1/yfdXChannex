@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { flushProperty } from "@/lib/outbox";
 import { EDITABLE_FIELDS, fieldBelongsToRatePlan, type EditableField } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -157,7 +158,23 @@ export async function POST(request: Request) {
     .eq("property_id", propertyId)
     .gt("id", beforeId);
 
-  return NextResponse.json({ rows: rows.length, queued: queued ?? 0 });
+  // Drain what this edit enqueued. The delta still goes trigger -> outbox ->
+  // batched call; this only stops the queue sitting there until something else
+  // happens to run the worker. Without it a price change in the grid reaches
+  // Channex whenever the next worker run happens to be, which during a live
+  // review looks like nothing happening at all.
+  //
+  // A Channex failure must not fail the save. The row is already written and
+  // the outbox keeps the delta with its attempt count, so the worker retries.
+  let calls: { path: string; values: number; task_id: string | null; ok: boolean }[] = [];
+  try {
+    const report = await flushProperty(propertyId);
+    calls = report.calls.map((c) => ({ path: c.path, values: c.values, task_id: c.task_id, ok: c.ok }));
+  } catch (err) {
+    console.error("[api/ari] flush after save failed, delta stays queued:", err);
+  }
+
+  return NextResponse.json({ rows: rows.length, queued: queued ?? 0, calls });
 }
 
 function pick(
