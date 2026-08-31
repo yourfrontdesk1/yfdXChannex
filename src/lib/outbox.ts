@@ -25,7 +25,7 @@ type OutboxRow = {
 /** Every restriction field that travels on a rate plan, in the order Channex name them. */
 const RESTRICTION_FIELDS = [
   "rate",
-  "min_stay",
+  "min_stay_through",
   "min_stay_arrival",
   "max_stay",
   "closed_to_arrival",
@@ -293,7 +293,7 @@ export function buildRestrictionValues(
 
     const payload = compact({
       rate: cell.rate === null || cell.rate === undefined ? null : Number(cell.rate).toFixed(2),
-      min_stay: cell.min_stay,
+      min_stay_through: cell.min_stay_through,
       min_stay_arrival: cell.min_stay_arrival,
       max_stay: cell.max_stay,
       closed_to_arrival: cell.closed_to_arrival,

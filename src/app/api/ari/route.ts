@@ -12,7 +12,7 @@ type IncomingEdit = {
   value: string | boolean | null;
 };
 
-const INT_FIELDS = new Set<EditableField>(["availability", "min_stay", "min_stay_arrival", "max_stay"]);
+const INT_FIELDS = new Set<EditableField>(["availability", "min_stay_through", "min_stay_arrival", "max_stay"]);
 const BOOL_FIELDS = new Set<EditableField>(["closed_to_arrival", "closed_to_departure", "stop_sell"]);
 
 function coerce(field: EditableField, value: string | boolean | null): number | string | boolean | null {
@@ -127,7 +127,7 @@ export async function POST(request: Request) {
       date: cell.date,
       availability: pick(prior, cell.fields, "availability"),
       rate: pick(prior, cell.fields, "rate"),
-      min_stay: pick(prior, cell.fields, "min_stay"),
+      min_stay_through: pick(prior, cell.fields, "min_stay_through"),
       min_stay_arrival: pick(prior, cell.fields, "min_stay_arrival"),
       max_stay: pick(prior, cell.fields, "max_stay"),
       closed_to_arrival: pick(prior, cell.fields, "closed_to_arrival"),

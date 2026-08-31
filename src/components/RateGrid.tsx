@@ -20,7 +20,7 @@ type EditValue = string | boolean | null;
 
 const NUMERIC_ROWS: { field: EditableField; label: string }[] = [
   { field: "rate", label: "Rate" },
-  { field: "min_stay", label: "Min stay" },
+  { field: "min_stay_through", label: "Min stay through" },
   { field: "min_stay_arrival", label: "Min stay on arrival" },
   { field: "max_stay", label: "Max stay" },
 ];

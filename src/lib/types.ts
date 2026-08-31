@@ -47,7 +47,7 @@ export type AriRow = {
   date: string;
   availability: number | null;
   rate: string | number | null;
-  min_stay: number | null;
+  min_stay_through: number | null;
   min_stay_arrival: number | null;
   max_stay: number | null;
   closed_to_arrival: boolean | null;
@@ -67,7 +67,7 @@ export type CellEdit = {
 export type EditableField =
   | "availability"
   | "rate"
-  | "min_stay"
+  | "min_stay_through"
   | "min_stay_arrival"
   | "max_stay"
   | "closed_to_arrival"
@@ -77,7 +77,7 @@ export type EditableField =
 export const EDITABLE_FIELDS: EditableField[] = [
   "availability",
   "rate",
-  "min_stay",
+  "min_stay_through",
   "min_stay_arrival",
   "max_stay",
   "closed_to_arrival",

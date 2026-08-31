@@ -65,7 +65,7 @@ create table if not exists ari (
   date date not null,
   availability int,
   rate numeric(10,2),
-  min_stay int,
+  min_stay_through int,
   min_stay_arrival int,
   max_stay int,
   closed_to_arrival boolean,
@@ -143,15 +143,19 @@ begin
   new.updated_at := now();
 
   if tg_op = 'INSERT' then
-    insert into outbox (property_id, kind, room_type_id, rate_plan_id, date)
-    values (new.property_id, 'availability', new.room_type_id, null, new.date);
+    -- A rate plan row carries no availability, so inserting one must not queue
+    -- an availability delta that has nothing to say.
+    if new.availability is not null then
+      insert into outbox (property_id, kind, room_type_id, rate_plan_id, date)
+      values (new.property_id, 'availability', new.room_type_id, null, new.date);
+    end if;
 
     if new.rate is not null then
       insert into outbox (property_id, kind, room_type_id, rate_plan_id, date)
       values (new.property_id, 'rate', new.room_type_id, new.rate_plan_id, new.date);
     end if;
 
-    if new.min_stay is not null
+    if new.min_stay_through is not null
        or new.min_stay_arrival is not null
        or new.max_stay is not null
        or new.closed_to_arrival is not null
@@ -175,7 +179,7 @@ begin
   end if;
 
   changed :=
-       new.min_stay is distinct from old.min_stay
+       new.min_stay_through is distinct from old.min_stay_through
     or new.min_stay_arrival is distinct from old.min_stay_arrival
     or new.max_stay is distinct from old.max_stay
     or new.closed_to_arrival is distinct from old.closed_to_arrival
