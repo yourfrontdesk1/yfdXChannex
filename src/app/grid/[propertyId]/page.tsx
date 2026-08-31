@@ -1,3 +1,5 @@
+import { redirect } from "next/navigation";
+import { signedIn, authRequired } from "@/lib/session";
 import Link from "next/link";
 import { db } from "@/lib/db";
 import RateGrid from "@/components/RateGrid";
@@ -15,6 +17,8 @@ export default async function GridPage({
   params: Promise<{ propertyId: string }>;
   searchParams: Promise<{ start?: string; days?: string }>;
 }) {
+  if (authRequired() && !(await signedIn())) redirect("/sign-in");
+
   const { propertyId } = await params;
   const sp = await searchParams;
 

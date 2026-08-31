@@ -1,3 +1,5 @@
+import { redirect } from "next/navigation";
+import { signedIn, authRequired } from "@/lib/session";
 import Link from "next/link";
 import { db } from "@/lib/db";
 import type { Account, Property } from "@/lib/types";
@@ -5,6 +7,8 @@ import type { Account, Property } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
+  if (authRequired() && !(await signedIn())) redirect("/sign-in");
+
   let accounts: Account[] = [];
   let properties: Property[] = [];
   let error: string | null = null;

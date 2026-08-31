@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { flushProperty } from "@/lib/outbox";
+import { guard } from "@/lib/session";
 import { EDITABLE_FIELDS, fieldBelongsToRatePlan, type EditableField } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +32,11 @@ function coerce(field: EditableField, value: string | boolean | null): number | 
 }
 
 export async function POST(request: Request) {
+  // This route writes rates and availability through to the channel manager, so
+  // on a public deployment it is signed in or nothing.
+  const denied = await guard(request);
+  if (denied) return NextResponse.json({ error: denied }, { status: 401 });
+
   let payload: { property_id?: string; edits?: IncomingEdit[] };
   try {
     payload = await request.json();
