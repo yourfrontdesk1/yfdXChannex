@@ -31,11 +31,24 @@ if (!url || !key) {
 const db = createClient(url, key, { auth: { persistSession: false } });
 const withRates = process.argv.includes("--rates");
 
+const CHANNEX_PROPERTY_ID = "5bb09c14-3566-4d29-bfc8-1553dfefa5d2";
+
+// These Channex ids already exist on staging. They are adopted rather than
+// created, because provisioning against an already provisioned property makes a
+// second set of everything.
 const ROOM_TYPES = [
-  { name: "Studio Apartment",      code: "1717679004", units: 3, sleeps: 2, rate: 92,  apartments: "3.17A, 4.17A, 8.17A" },
-  { name: "Executive Studio",      code: "1717679003", units: 5, sleeps: 3, rate: 98,  apartments: "1.11, 2.05, 7.08, 7.18, 9.17B" },
-  { name: "One Bedroom Apartment", code: "1717679001", units: 3, sleeps: 4, rate: 99,  apartments: "1.14, 3.17B, 4.17B" },
-  { name: "Two Bedroom Apartment", code: "1717679002", units: 1, sleeps: 5, rate: 120, apartments: "2.17" },
+  { name: "Studio Apartment",      code: "1717679004", units: 3, sleeps: 2, rate: 92,  apartments: "3.17A, 4.17A, 8.17A",
+    channex_room_type_id: "e68516e2-2e95-4f42-b4d6-a08df112897f",
+    channex_rate_plan_id: "bb103248-58c7-4a0a-b6ed-f51f48b53681" },
+  { name: "Executive Studio",      code: "1717679003", units: 5, sleeps: 3, rate: 98,  apartments: "1.11, 2.05, 7.08, 7.18, 9.17B",
+    channex_room_type_id: "5e64144e-9c7b-4dd6-b74e-4b06f86408de",
+    channex_rate_plan_id: "69a9b518-4c08-4a64-aff3-f8621a3c5779" },
+  { name: "One Bedroom Apartment", code: "1717679001", units: 3, sleeps: 4, rate: 99,  apartments: "1.14, 3.17B, 4.17B",
+    channex_room_type_id: "7fbf0e25-76a5-491e-90de-55a28f68b7ad",
+    channex_rate_plan_id: "c885bde4-2760-479d-8df7-d1c313c46d9b" },
+  { name: "Two Bedroom Apartment", code: "1717679002", units: 1, sleeps: 5, rate: 120, apartments: "2.17",
+    channex_room_type_id: "85fc28f7-5e80-4e3a-b3e1-1d1a623de039",
+    channex_rate_plan_id: "00ca626f-41ae-4921-8a83-bb25b2641f95" },
 ];
 
 async function upsert(table, match, row) {
@@ -57,6 +70,7 @@ const property = await upsert("properties", { account_id: account.id, name: "Vic
   name: "Victory Suites Parkside",
   currency: "GBP",
   timezone: "Europe/Gibraltar",
+  channex_property_id: CHANNEX_PROPERTY_ID,
 });
 console.log("property", property.name, property.id);
 
@@ -71,6 +85,7 @@ for (const [i, rt] of ROOM_TYPES.entries()) {
     occ_infants: 0,
     default_occupancy: rt.sleeps,
     ota_room_type_code: rt.code,
+    channex_room_type_id: rt.channex_room_type_id,
     sort: i,
   });
   const plan = await upsert("rate_plans", { room_type_id: roomType.id, name: "Best Available Rate" }, {
@@ -78,6 +93,7 @@ for (const [i, rt] of ROOM_TYPES.entries()) {
     name: "Best Available Rate",
     occupancy: rt.sleeps,
     is_primary: true,
+    channex_rate_plan_id: rt.channex_rate_plan_id,
   });
   plans.push({ roomType, plan, rate: rt.rate });
   console.log(`  ${rt.name}, ${rt.units} units, sleeps ${rt.sleeps}, ${rt.apartments}`);
