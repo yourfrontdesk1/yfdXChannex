@@ -31,18 +31,18 @@ as **exactly one API call**, which is what the scenarios saying "this should be
 
 | Test | Scenario | Endpoint | Values | Task id |
 |---|---|---|---|---|
-| 1 | Full sync, 500 days | `/availability` | 750 | `5e22c7c4-f4a2-4b2d-aa73-3c082f2d42d3` |
-| 1 | Full sync, 500 days | `/restrictions` | 1924 | `f5c06549-6dc9-47ab-a03e-7c5e9114b0a3` |
-| 2 | Single date, single rate | `/restrictions` | 1 | `6e4d2367-09b4-4aee-a7f0-355fa606f2b6` |
-| 3 | Single date, multiple rates | `/restrictions` | 3 | `55e86894-89ed-477b-bc84-fe4a55784f6b` |
-| 4 | Multiple dates, multiple rates | `/restrictions` | 3 | `6f123340-4e7f-4d91-80fa-758f79c080e2` |
-| 5 | Min stay | `/restrictions` | 3 | `059724ba-17ef-4c0a-a1c2-304bc0a13360` |
-| 6 | Stop sell | `/restrictions` | 2 | `bab279b4-35fa-4b3a-8a64-baccfdd3554d` |
-| 7 | Multiple restrictions | `/restrictions` | 4 | `f8d8a9ad-06d4-452e-8519-84bef2f48753` |
-| 8 | Half year, Dec 2026 to May 2027 | `/restrictions` | 2 | `001c8edf-1f15-483b-9553-0cbbfa95a325` |
-| 9 | Single date availability | `/availability` | 2 | `0dac7113-b8f5-4ce0-a230-b47ae5dc2ea7` |
-| 10 | Multiple date availability | `/availability` | 5 | `1fbb9059-d649-44db-83fb-a32d6a64f5ff` |
-| 11 | Booking receive, modify, cancel | feed + ack | 3 revisions | passed first time, ids below |
+| 1 | Full sync, 500 days | `/availability` | 751 | `dcb76ad2-e019-44a2-9612-37ce6c634c11` |
+| 1 | Full sync, 500 days | `/restrictions` | 1925 | `5d8cc0b8-cc8a-47ec-ac3e-133972b22848` |
+| 2 | Single date, single rate | `/restrictions` | 1 | `5d8c786a-73d2-4833-bf14-34453a9dcca6` |
+| 3 | Single date, multiple rates | `/restrictions` | 3 | `4a6eb526-4291-4483-b67a-c564f940797f` |
+| 4 | Multiple dates, multiple rates | `/restrictions` | 3 | `94a21497-9850-4bf5-84c1-f82d486c2026` |
+| 5 | Min stay | `/restrictions` | 3 | `02fb2f9e-5a30-4886-8303-f7d7135faa72` |
+| 6 | Stop sell | `/restrictions` | 3 | `14434a81-08be-4a0f-93fe-fbb13af88797` |
+| 7 | Multiple restrictions | `/restrictions` | 4 | `f60e893a-8b8c-46a4-9e47-850e81807ef1` |
+| 8 | Half year, Dec 2026 to May 2027 | `/restrictions` | 2 | `123e75dc-36f4-472f-bd14-1eaea96095ba` |
+| 9 | Single date availability | `/availability` | 2 | `242d6ecf-dc53-44ca-8944-fd037e9fbe6e` |
+| 10 | Multiple date availability | `/availability` | 2 | `9ef1d8a4-75a2-4f82-a396-6f9bb16bb6a2` |
+| 11 | Booking receive, modify, cancel | feed + ack | 3 revisions | passed twice, ids below |
 
 ### Test 11 ids
 
