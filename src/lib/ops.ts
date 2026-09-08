@@ -51,6 +51,7 @@ const EXPECTED_GAP_MINUTES: Record<string, number> = {
   "bookings-poll": 60,
   "send-links": 30,
   "answer-messages": 20,
+  "retry-forward": 45,
 };
 
 /**

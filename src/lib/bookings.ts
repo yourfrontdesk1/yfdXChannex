@@ -368,3 +368,56 @@ async function forwardToGuestPortal(property: Property, revision: BookingRevisio
     return false;
   }
 }
+
+
+export type RetryResult = { pending: number; retried: number; succeeded: number; failed: number; errors: string[] };
+
+/**
+ * Bookings that reached us but never reached the portal.
+ *
+ * Once a revision is acknowledged, Channex will not offer it again: the feed
+ * only holds what is unacknowledged and the webhook fires once. So without this,
+ * a portal that was down for ten minutes means a guest who never receives a
+ * link, silently, forever. Nothing else in the system would have noticed.
+ */
+export async function retryUnforwarded(limit = 20): Promise<RetryResult> {
+  const supabase = db();
+  const result: RetryResult = { pending: 0, retried: 0, succeeded: 0, failed: 0, errors: [] };
+
+  const { data: stuck, error } = await supabase
+    .from("inbound_bookings")
+    .select("id, property_id, payload, status, received_at")
+    .is("forwarded_at", null)
+    .neq("status", "cancelled")
+    .not("property_id", "is", null)
+    .order("received_at", { ascending: true })
+    .limit(limit);
+  if (error) throw new Error(`Reading unforwarded bookings: ${error.message}`);
+
+  result.pending = stuck?.length ?? 0;
+
+  for (const row of stuck ?? []) {
+    const { data: propertyRow } = await supabase
+      .from("properties")
+      .select("*")
+      .eq("id", row.property_id as string)
+      .maybeSingle();
+    const property = propertyRow as Property | null;
+    if (!property?.downstream_url || !property.is_active) continue;
+
+    result.retried++;
+    const ok = await forwardDownstream(property, row.payload as BookingRevision);
+    if (ok) result.succeeded++;
+    else {
+      result.failed++;
+      const { data: after } = await supabase
+        .from("inbound_bookings")
+        .select("forward_error")
+        .eq("id", row.id as string)
+        .maybeSingle();
+      if (after?.forward_error) result.errors.push(after.forward_error as string);
+    }
+  }
+
+  return result;
+}
