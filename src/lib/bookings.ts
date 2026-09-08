@@ -231,6 +231,14 @@ async function forwardDownstream(property: Property, revision: BookingRevision):
   const supabase = db();
   const revisionId = revision.id ?? revision.revision_id;
 
+  // The Victory Suites guest portal has its own booking API, which also mints
+  // the guest link and the payment link. Handing it the raw Channex revision
+  // would mean building a second importer inside a live system, so the revision
+  // is translated into the shape that API already speaks.
+  if (property.downstream_url.includes("/api/external/bookings")) {
+    return forwardToGuestPortal(property, revision);
+  }
+
   try {
     const { data: row } = await supabase
       .from("properties")
@@ -258,6 +266,85 @@ async function forwardDownstream(property: Property, revision: BookingRevision):
     await supabase
       .from("inbound_bookings")
       .update({ forwarded_at: new Date().toISOString(), forward_error: null })
+      .eq("revision_id", revisionId);
+    return true;
+  } catch (e) {
+    await supabase
+      .from("inbound_bookings")
+      .update({ forward_error: e instanceof Error ? e.message : String(e) })
+      .eq("revision_id", revisionId);
+    return false;
+  }
+}
+
+
+/**
+ * Hands a booking to the Victory Suites guest portal, which creates the guest,
+ * the booking and the payment link and gives back the guest's own portal URL.
+ *
+ * No apartment is named. The portal decides which of the twelve units a room
+ * type booking becomes, exactly as it does for every other channel, so there is
+ * one place that answers "which flat is this guest in" rather than two that can
+ * disagree.
+ */
+async function forwardToGuestPortal(property: Property, revision: BookingRevision): Promise<boolean> {
+  const supabase = db();
+  const revisionId = revision.id ?? revision.revision_id;
+  const key = process.env.PORTAL_API_KEY;
+  if (!key) return false;
+
+  const cancelled = String(revision.status).toLowerCase() === "cancelled";
+  const externalRef = revision.ota_reservation_code ?? revision.unique_id ?? revision.booking_id ?? revisionId;
+  const room = revision.rooms?.[0];
+
+  const body: Record<string, unknown> = cancelled
+    ? { status: "cancelled", external_ref: externalRef }
+    : {
+        guest: {
+          first_name: revision.customer?.name ?? "Guest",
+          last_name: revision.customer?.surname ?? (revision.ota_name ?? "Booking"),
+        },
+        check_in: revision.arrival_date,
+        check_out: revision.departure_date,
+        source: revision.ota_name ?? "Booking.com",
+        channel: revision.ota_name ?? null,
+        amount: revision.amount ? Number(revision.amount) : undefined,
+        currency: revision.currency ?? "GBP",
+        external_ref: externalRef,
+        room_name: room?.room_type_id ?? null,
+        ota_status: revision.status,
+        sending_system: "channex",
+        nightly_rates: revision.rooms ?? null,
+      };
+
+  try {
+    const res = await fetch(property.downstream_url as string, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+
+    if (!res.ok) {
+      await supabase
+        .from("inbound_bookings")
+        .update({ forward_error: `${res.status} ${text.slice(0, 500)}` })
+        .eq("revision_id", revisionId);
+      return false;
+    }
+
+    let payload: { token?: string; portal_url?: string; payment_link?: string | null } = {};
+    try { payload = JSON.parse(text); } catch {}
+
+    await supabase
+      .from("inbound_bookings")
+      .update({
+        forwarded_at: new Date().toISOString(),
+        forward_error: null,
+        portal_token: payload.token ?? null,
+        portal_url: payload.portal_url ?? null,
+        payment_link: payload.payment_link ?? null,
+      })
       .eq("revision_id", revisionId);
     return true;
   } catch (e) {
