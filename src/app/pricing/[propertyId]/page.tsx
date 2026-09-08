@@ -100,6 +100,9 @@ export default async function PricingPage({ params }: { params: Promise<{ proper
         <p className="legend">
           Eight jobs run unattended. This says when each last worked, and calls it stale when it has been quiet
           longer than it should be. Machine readable at <code>/api/health</code>.
+          {ops.closures > 0
+            ? ` Warning: ${ops.closures} nights in the grid are closed or capped. Nothing here ever closes a night, so something else did.`
+            : " No night in the grid is closed or capped, which is how it should be."}
         </p>
         <table className="plain">
           <thead><tr><th>Job</th><th>Last good run</th><th>State</th></tr></thead>

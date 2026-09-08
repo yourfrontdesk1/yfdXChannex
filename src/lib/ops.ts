@@ -53,7 +53,40 @@ const EXPECTED_GAP_MINUTES: Record<string, number> = {
   "answer-messages": 20,
 };
 
-export async function health(): Promise<{ healthy: boolean; jobs: JobHealth[] }> {
+/**
+ * Nothing in this service ever closes a night. Availability at zero is how a
+ * sold out night is expressed, so a stop sell or a closed arrival sitting in the
+ * grid came from somewhere else, and the last time that happened it was left
+ * behind by certification and would have shut 155 nights on a live listing.
+ * Counted here so it can never sit there quietly again.
+ */
+async function unexplainedClosures(): Promise<number> {
+  const supabase = db();
+
+  // Only properties that can actually sell. A retired property still carries
+  // whatever certification left on it, and none of it reaches a guest.
+  const { data: live } = await supabase.from("properties").select("id").eq("is_active", true);
+  const ids = (live ?? []).map((p) => p.id as string);
+  if (ids.length === 0) return 0;
+
+  let total = 0;
+  for (const filter of ["stop_sell", "closed_to_arrival", "closed_to_departure"] as const) {
+    const { count } = await supabase
+      .from("ari")
+      .select("id", { count: "exact", head: true })
+      .in("property_id", ids)
+      .eq(filter, true);
+    total += count ?? 0;
+  }
+  const { count: maxStay } = await supabase
+    .from("ari")
+    .select("id", { count: "exact", head: true })
+    .in("property_id", ids)
+    .not("max_stay", "is", null);
+  return total + (maxStay ?? 0);
+}
+
+export async function health(): Promise<{ healthy: boolean; jobs: JobHealth[]; closures: number }> {
   const supabase = db();
   const jobs: JobHealth[] = [];
 
@@ -79,5 +112,6 @@ export async function health(): Promise<{ healthy: boolean; jobs: JobHealth[] }>
     });
   }
 
-  return { healthy: jobs.every((j) => !j.stale), jobs };
+  const closures = await unexplainedClosures();
+  return { healthy: jobs.every((j) => !j.stale) && closures === 0, jobs, closures };
 }
