@@ -135,6 +135,7 @@ export type ConnectResult = {
   test_connection: boolean;
   channel_id: string | null;
   mapped: number;
+  unmapped: string[];
   readiness: unknown;
   error: string | null;
 };
@@ -151,6 +152,7 @@ export async function connectBookingCom(propertyId: string, hotelId: string): Pr
     test_connection: false,
     channel_id: null,
     mapped: 0,
+    unmapped: [],
     readiness: null,
     error: null,
   };
@@ -189,11 +191,18 @@ export async function connectBookingCom(propertyId: string, hotelId: string): Pr
   for (const plan of (ratePlanRows ?? []) as (RatePlan & { ota_rate_plan_code: string | null })[]) {
     const roomType = roomTypes.find((r) => r.id === plan.room_type_id);
     if (!plan.channex_rate_plan_id || !roomType?.ota_room_type_code) continue;
+    // A rate plan with no OTA code is left out rather than sent under the room
+    // code. The two are different namespaces on Booking.com, and inventing one
+    // from the other maps our rate onto whatever happens to share that number.
+    if (!plan.ota_rate_plan_code) {
+      result.unmapped.push(plan.name);
+      continue;
+    }
     mappings.push({
       rate_plan_id: plan.channex_rate_plan_id,
       settings: {
         room_type_code: roomType.ota_room_type_code,
-        rate_plan_code: plan.ota_rate_plan_code ?? roomType.ota_room_type_code,
+        rate_plan_code: plan.ota_rate_plan_code,
         occupancy: plan.occupancy,
         primary_occ: true,
         readonly: false,
