@@ -34,7 +34,7 @@ export default async function Home() {
   let queued = 0;
   let channels: { ota_hotel_id: string | null; is_active: boolean; property_id: string }[] = [];
   let moves: { date: string; price: number; previous: number | null; room_type_id: string }[] = [];
-  let arrivals: { guest_name: string | null; arrival_date: string | null; forwarded_at: string | null; link_sent_at: string | null; status: string }[] = [];
+  let arrivals: { guest_name: string | null; arrival_date: string | null; forwarded_at: string | null; link_sent_at: string | null; status: string; property_id: string }[] = [];
   let open: { reason: string; message: string | null }[] = [];
   let switches: { key: string; value: string }[] = [];
   let roomTypeName = new Map<string, string>();
@@ -46,7 +46,11 @@ export default async function Home() {
       supabase.from("outbox").select("id", { count: "exact", head: true }).is("sent_at", null),
       supabase.from("channels").select("ota_hotel_id, is_active, property_id"),
       supabase.from("pricing_log").select("date, price, previous, room_type_id").order("at", { ascending: false }).limit(8),
-      supabase.from("inbound_bookings").select("guest_name, arrival_date, forwarded_at, link_sent_at, status").order("received_at", { ascending: false }).limit(8),
+      supabase
+        .from("inbound_bookings")
+        .select("guest_name, arrival_date, forwarded_at, link_sent_at, status, property_id")
+        .order("received_at", { ascending: false })
+        .limit(40),
       supabase.from("escalations").select("reason, message").is("resolved_at", null).order("raised_at", { ascending: false }).limit(5),
       supabase.from("hub_config").select("key, value").order("key"),
       supabase.from("room_types").select("id, name"),
@@ -62,8 +66,14 @@ export default async function Home() {
     // The properties table below still renders; this panel simply stays quiet.
   }
 
-  const liveChannel = channels.find((c) => c.is_active);
-  const readyChannel = channels.find((c) => !c.is_active && c.ota_hotel_id);
+  // Only properties that can actually sell. A retired certification property
+  // still has a channel row and old test bookings against it, and showing those
+  // as "the latest" is worse than showing nothing.
+  const liveIds = new Set(properties.filter((p) => p.is_active).map((p) => p.id));
+  const liveChannels = channels.filter((c) => liveIds.has(c.property_id));
+  const liveChannel = liveChannels.find((c) => c.is_active);
+  const readyChannel = liveChannels.find((c) => !c.is_active && c.ota_hotel_id);
+  arrivals = arrivals.filter((b) => liveIds.has(b.property_id as string)).slice(0, 8);
 
   return (
     <div className="stack">
