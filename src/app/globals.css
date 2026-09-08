@@ -220,3 +220,25 @@ table.grid td.gone { opacity: .45; }
 table.grid .price { display: block; }
 table.grid .free { display: block; color: var(--muted); font-size: 11px; }
 table.plain .sticky { position: sticky; left: 0; background: var(--surface); }
+
+/* The two small plots on the control room. One axis each, never shared. */
+svg.nights { width: 100%; height: auto; min-width: 620px; display: block; }
+svg.nights .bar { fill: var(--primary); opacity: .78; }
+svg.nights .bar.full { fill: var(--accent); opacity: .95; }
+svg.nights .pline { fill: none; stroke: var(--secondary); stroke-width: 2; }
+svg.nights .pdot { fill: var(--secondary); }
+svg.nights .rule { stroke: var(--line); stroke-width: 1; }
+svg.nights .ax { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+svg.nights .ax.mid { text-anchor: middle; }
+
+/* The headline numbers. Big only where the number is the point. */
+.figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: var(--radius); overflow: hidden; }
+.figures > div { background: var(--surface); padding: 16px 18px; }
+.figures dt { color: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; margin: 0 0 6px; }
+.figures dd { margin: 0; font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.figures dd small { display: block; font-size: 12px; font-weight: 400; color: var(--muted); margin-top: 3px; }
+.statusline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.dot.ok { background: var(--secondary); }
+.dot.bad { background: var(--danger); }
+.actions a { margin-right: 14px; }
