@@ -269,3 +269,46 @@ by this integration.
 ## Scenarios skipped
 
 None. All scenarios were performed against the dedicated test property.
+
+## Production cutover, 8 September 2026
+
+The hub runs on the live Channex account. `CHANNEX_ENV=production` and a
+production `CHANNEX_API_KEY` are set on Vercel (`channel-hub`, Production) and in
+`.env.local`, so local and deployed both talk to `app.channex.io`. The staging key
+is kept in the scratchpad backup only.
+
+Every staging id was cleared before the switch, because the hub holds one
+`CHANNEX_ENV` for all properties and a staging id pushed at a live channel is the
+one mistake that cannot be undone quietly. Cleared: both accounts'
+`channex_group_id`, both properties' `channex_property_id`, 6 room types, 12 rate
+plans, and both `channels` rows (also set inactive). The certification test
+property is `is_active=false` and lost its Booking.com room codes with it. The
+outbox was empty, so nothing stale could drain into production.
+
+Parkside was then rebuilt on production by `POST /api/provision`:
+
+- group `23b94e08-458b-41ea-86de-5a9e21433f78` (Victory Suites)
+- property `70372215-ecee-4c4e-801b-fc493c4c7897`
+- 4 room types, 8 rate plans, all created clean
+
+`POST /api/full-sync?force=1` then pushed 500 days as **two calls**, the same
+shape certification passed on: availability task
+`ab1fd5d8-3e4f-47c5-9526-67aaec891742` with 615 values, restrictions task
+`9192c7e5-98a1-4f9b-94d8-0ac42acc2f82` with 3484 values, both `success: true`
+with no errors.
+
+Booking webhook `209a5e3a-b19f-464e-b44e-2f79afec43e0` is registered on
+production against the Parkside property, pointed at
+`/api/webhooks/channex` on channel-hub-phi.vercel.app, `send_data` true, secret
+in the `x-channex-webhook-secret` header, mask
+`booking_new;booking_modification;booking_cancellation` (semicolons, a comma is
+rejected). The 15 minute `/api/bookings/poll` cron stays as the recovery path.
+
+**Still open, and deliberately so.** No channel exists on the production account
+yet. The real Parkside listing, Booking.com hotel `17176790`, is still driven by
+Little Hotelier. Channex allows one connection per hotel id across their entire
+platform, so it has to come off Little Hotelier in the extranet first, and only
+then does `/api/provision?action=connect&hotel_id=17176790` have anything to bind
+to. Room codes 1717679001 to 1717679004 are already stored on the Parkside room
+types and survived the cutover, so the connect call has what it needs. That step
+is Leon's to trigger. The main Victory Suites listing does not move.
