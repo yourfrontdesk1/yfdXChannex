@@ -384,12 +384,20 @@ export async function retryUnforwarded(limit = 20): Promise<RetryResult> {
   const supabase = db();
   const result: RetryResult = { pending: 0, retried: 0, succeeded: 0, failed: 0, errors: [] };
 
+  // Everything before the production cutover belongs to certification: staging
+  // test hotels, invented guests, dates in the past. None of it is a real
+  // reservation and none of it may reach a live guest portal. The first run of
+  // this retry pushed one of them through before this guard existed.
+  const { data: cutoverRow } = await supabase.from("hub_config").select("value").eq("key", "forward_cutover_at").maybeSingle();
+  const cutover = (cutoverRow?.value as string) ?? new Date().toISOString();
+
   const { data: stuck, error } = await supabase
     .from("inbound_bookings")
     .select("id, property_id, payload, status, received_at")
     .is("forwarded_at", null)
     .neq("status", "cancelled")
     .not("property_id", "is", null)
+    .gte("received_at", cutover)
     .order("received_at", { ascending: true })
     .limit(limit);
   if (error) throw new Error(`Reading unforwarded bookings: ${error.message}`);
