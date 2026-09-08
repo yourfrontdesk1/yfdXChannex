@@ -1,6 +1,16 @@
 {
   "crons": [
-    { "path": "/api/worker", "schedule": "*/5 * * * *" },
-    { "path": "/api/bookings/poll", "schedule": "*/15 * * * *" }
+    {
+      "path": "/api/worker",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/bookings/poll",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/availability/sync",
+      "schedule": "7,37 * * * *"
+    }
   ]
 }
