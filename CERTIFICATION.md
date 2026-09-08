@@ -25,41 +25,71 @@ own outbox worker. No script calls the Channex API directly.
 
 ## Task ids
 
+**Fourth run, 8 Sep 2026 08:49 to 08:52 UTC**, against the deployed service at
+`channel-hub-phi.vercel.app`. Before the run every cell a scenario touches was
+set, through the same grid route, to a value that is NOT the scenario value for
+every field the scenario sets, so each field below is a genuine change and
+appears in the request body. Each body was then read back out of `channex_log`
+by task id and matched field for field against the scenario tables in the
+Channex document: only the changed fields travel, ranges collapse to one value
+object per rate plan, and both min stay fields go together.
+
 The form wants the bare id only, not the response body. Every scenario went out
 as **exactly one API call**, which is what the scenarios saying "this should be
 1 API call" are testing.
 
 | Test | Scenario | Endpoint | Values | Task id |
 |---|---|---|---|---|
-| 1 | Full sync, 500 days | `/availability` | 751 | `e81cab92-59a6-474a-a9fe-dfc199488f3a` |
-| 1 | Full sync, 500 days | `/restrictions` | 1925 | `3aa36019-66cc-4481-9857-a00a7b918fc5` |
-| 2 | Single date, single rate | `/restrictions` | 1 | `cc11d6cc-6780-43e8-84d4-7ac5918adf23` |
-| 3 | Single date, multiple rates | `/restrictions` | 3 | `54ec17f8-8fff-44f9-aa64-9586aca0439f` |
-| 4 | Multiple dates, multiple rates | `/restrictions` | 3 | `fad0eaf1-7295-4ec3-9339-96bfad012f54` |
-| 5 | Min stay | `/restrictions` | 3 | `27c05c10-76a3-4783-bd22-c3e3e9753442` |
-| 6 | Stop sell | `/restrictions` | 3 | `ea1c2cde-a211-423c-9e84-c371272f0549` |
-| 7 | Multiple restrictions | `/restrictions` | 4 | `af48eb78-8fee-4c14-ad01-5719bc8c06f6` |
-| 8 | Half year, Dec 2026 to May 2027 | `/restrictions` | 2 | `c275e4cb-30d6-4ddd-8751-90ccadc6e681` |
-| 9 | Single date availability | `/availability` | 2 | `507a7ef5-e464-47e8-9568-a5f12826ee58` |
-| 10 | Multiple date availability | `/availability` | 2 | `38b929b7-efd9-403f-8cf9-909b128277a5` |
+| 1 | Full sync, 500 days | `/availability` | 747 | `c8f12d90-2147-48f5-9561-f1aad844f4f3` |
+| 1 | Full sync, 500 days | `/restrictions` | 1925 | `ae8d548a-29ff-4b27-880d-f146893287d0` |
+| 2 | Single date, single rate | `/restrictions` | 1 | `0cfb075a-14f9-44f8-bddd-1a0e4f8f8fa9` |
+| 3 | Single date, multiple rates | `/restrictions` | 3 | `03076875-cc9f-4093-972d-032ee21e1c06` |
+| 4 | Multiple dates, multiple rates | `/restrictions` | 3 | `b48785d0-eeee-4975-8786-9edb1254e469` |
+| 5 | Min stay | `/restrictions` | 3 | `d299f5a9-a49b-4854-90c7-33b0038b03aa` |
+| 6 | Stop sell | `/restrictions` | 3 | `55d6e826-08d7-4f7e-a20e-d4b977aa9251` |
+| 7 | Multiple restrictions | `/restrictions` | 4 | `1c35ebc2-dc9d-4493-b946-09c59db001de` |
+| 8 | Half year, Dec 2026 to May 2027 | `/restrictions` | 2 | `70d83688-83f3-4244-b0a8-2b4c1a93b88f` |
+| 9 | Single date availability | `/availability` | 2 | `16d7d8e1-33ce-41ab-b169-13de3935b4d3` |
+| 10 | Multiple date availability | `/availability` | 2 | `0ae90515-a205-49c6-8fec-96e6ca41dd8e` |
 | 11 | Booking receive, modify, cancel | feed + ack | 3 revisions | passed twice, ids below |
 
 ### Test 11 ids
 
+Fourth run, 8 Sep 2026, on Channex test hotel `10485037` (USD, matching the
+property). Booking.com confirmation `6509905415`, guest "Certification Test",
+Studio, made through the public Booking.com test checkout, then changed to
+24 to 26 Nov through "Change dates", then cancelled through "Cancel booking".
+
 | Field | Value |
 |---|---|
-| Booking ID | `b8ae39e9-e396-4935-b0e2-a5072971a71e` |
-| New Revision | `ac4e35e0-11f2-4a7f-aefb-ae51a5d61506` |
-| Modified Revision | `81cb9d89-e876-405a-9e34-ffc5cbba85eb` |
-| Cancelled Revision | `faf4a553-deac-4ea4-8505-db71a53c64a4` |
+| Booking ID | `eccd4a80-4a43-464e-8a98-6e3ca5bf7e51` |
+| New Revision | `556f69aa-70a2-4177-afe3-8929fb158d4c` |
+| Modified Revision | `ce2baa7e-e03d-4be3-b445-a2dba4883785` |
+| Cancelled Revision | `a707b025-4e25-43fb-ba8f-9533987f9d4e` |
 
-All three revisions arrived on the same booking, were pulled from
-`/booking_revisions/feed`, acknowledged back with `POST /{id}/ack`, and applied
-in order. The modification updated the existing record rather than creating a
-second one, matching on revision.
+All three revisions arrived on the same booking, the first through the webhook
+and the feed, the others through the feed, each acknowledged back with
+`POST /{id}/ack` within a second of arrival, and applied in order. Availability
+followed the booking absolutely, not by delta: Twin 21 Nov went 7 to 6 on the
+new revision (task `016c5424-6de4-4398-9d6f-5ba5534ff921`), the modification
+released 21 Nov and took 24 and 25 Nov in one call of three values (task
+`45ed21de-cdfb-4c92-b422-1ff29872253e`), and the cancellation released both in
+one call of two values (task `0bb5df9d-49bb-45fc-b14b-256cb91acbb5`).
+
+Worth telling the reviewer: a first attempt to move the booking to 21 to 23 Nov
+was refused by Booking.com because 22 Nov is sold out with stop sell on our
+side, which is the integration doing its job.
+
+The 31 Aug run on test hotel `10484818` had booking
+`b8ae39e9-e396-4935-b0e2-a5072971a71e` with revisions
+`ac4e35e0-11f2-4a7f-aefb-ae51a5d61506`, `81cb9d89-e876-405a-9e34-ffc5cbba85eb`
+and `faf4a553-deac-4ea4-8505-db71a53c64a4`; Channex have since deleted that
+channel.
 
 Test 8 is the one worth pointing at in review: 304 edited cells across five
-months collapsed into a single call carrying 49 ranged values.
+months collapsed into a single call carrying 2 ranged values, one per rate plan,
+Twin Room Best Available Rate sending rate, min stay and both closures, Double
+Room Best Available Rate sending only rate and min stay.
 
 ## Data state
 
@@ -73,8 +103,19 @@ re-seed reproduces the same numbers a submitted task id was taken against.
 
 ## Channel
 
-Connected and **active** on Channex test hotel `10484818`, channel
-`243193cb-60c7-4d3b-b750-62918de01cea`, 4 mappings, readiness clean.
+Connected and **active** on Channex test hotel `10485037` (USD), channel
+`7e4ccdb3-c689-4597-9a89-811cdb1fda03`, 4 mappings (Twin to Studio
+`1048503703`, Double to Apartment `1048503702`, Best Available to Standard Rate
+`37364460`, Bed & Breakfast to Non-Refundable `37364467`), readiness clean.
+Booking webhook `01137a85-8b38-4cbb-a619-14f2ca7840a9` points at
+`/api/webhooks/channex` on channel-hub-phi.vercel.app with the shared secret in
+a header; the feed poll at `/api/bookings/poll` is the recovery path.
+
+The shared test hotels are leased and reclaimed. On 8 Sep every one of them was
+taken for the first hour; a retry every ten minutes got `10485037` at 09:00 UTC.
+The hotel's room and rate codes come from `POST /channels/mapping_details` with
+the hotel id, and are stored on our room types and rate plans before
+`/api/provision?action=connect` will map anything.
 
 **The real Parkside listing `17176790` has deliberately not been connected.**
 Only one channel per Booking.com hotel id exists across the whole of Channex, so
@@ -82,21 +123,90 @@ binding it in staging risks getting in the way at go-live.
 
 ## What is left
 
-All eleven scenarios are complete. Remaining:
+All eleven scenarios are complete. **Form resubmitted 8 Sep 2026** with the
+fourth run's ids, contact leon@victorygate.gi, all eight restrictions declared,
+no card data, not PCI. Remaining:
 
-1. Submit https://forms.gle/xA8F3eSYBPBd8apYA
-2. Their review, then the stage 4 screenshare
+1. Their review, then the stage 4 screenshare
 
-Note for the call: the channel on the shared test hotel carries rooms but no
-rate plan mappings, which is why inbound bookings arrived with a null
-`room_type_id` and did not decrement a specific room type. That is a mapping gap
-on their shared sandbox, not a code path: availability writes are demonstrated
-by tests 9 and 10, both of which pushed cleanly. Map rate plans in the Channex
-dashboard before relying on inbound availability decrements.
+Note for the call: the channel now carries full rate plan mappings, and the
+8 Sep booking decremented and released the right room type on every revision,
+so the earlier null `room_type_id` caveat no longer applies.
 
 At the screenshare they will ask for arbitrary changes made by hand in the rate
 grid. Everything above is reproducible that way; nothing here depends on the
 harness that collected the ids.
+
+---
+
+# Stage 4: live test by video (Channex email, 8 Sep 2026)
+
+Channex passed all eleven scenarios and asked for a short screen recording,
+no call needed, showing both the action in the PMS and the update arriving in
+the Channex staging app (property Messages or Logs screen). Upload it anywhere
+"anyone with the link" can open, and email the link plus the staging property
+id `06474740-b4e1-4b04-8aea-9660ca7bc56d` to evan@channex.io. They answer
+within two business days.
+
+Built for it on 8 Sep: a Bookings panel on the YourFrontDesk Channels page
+(`/channels`), backed by `POST /api/bookings` on the hub, table `bookings`.
+A booking holds its nights through the same effect logic inbound bookings use
+(`src/lib/holds.ts`), so only the touched dates are written and sent.
+
+Rehearsed through the route on 8 Sep, test property, Twin Room:
+
+| Step | What went to Channex | Task id |
+|---|---|---|
+| Add booking 2 to 3 Dec | one `/availability` call, 1 value, 2 Dec only | `30358022-2737-40e6-80fe-478d163821cd` |
+| Move a week later, 9 to 10 Dec | one `/availability` call, 2 values, 2 Dec released and 9 Dec taken | `421f14f7-6412-442f-9ef8-9289bdd5dbcc` |
+| Full sync | 2 calls, 751 availability and 1666 rate values | `360245fd-f38a-41b7-bec6-ae2f85ca28f7`, `6d2bf8d5-97f2-40cc-8dd9-1b7f1b5d9f52` |
+| Cancel | one `/availability` call, 1 value, 9 Dec released | `54954004-eee2-4cff-9b74-0c55437f70b3` |
+
+## Recording script
+
+Two windows side by side: YourFrontDesk `/channels` on the left with the
+**Test Property - YourFrontDesk** chosen, the Channex staging app on the right
+open on that property's Logs (or Messages) screen. Keep both visible the whole
+time. Speak or caption each step.
+
+1. Point at the grid: Twin Room "Rooms free" for the date you are about to
+   book. Say the number.
+2. Bookings panel: Room type Twin Room, check-in a date a month or two out,
+   check-out the next day, a guest name, **Add booking**. The toast names the
+   date and the task id. The grid cell drops by one. In Channex, refresh Logs:
+   one availability update, that one date, nothing else.
+3. **Move a week later** on that booking. Toast: two dates, one call. Grid: the
+   old date goes back up, the new date drops. Channex Logs: one availability
+   update carrying both dates.
+4. **Full sync** button top right. Toast: "two calls". Channex Logs: one
+   availability task and one restrictions task, nothing more.
+5. Optional but they asked for it before any call: **Cancel** the booking. One
+   availability update, the new date released.
+
+Choose dates that are open on our side; the grid shows it. A sold out or stop
+sell night would be refused, correctly, but it makes a confusing video.
+
+## Email to send with the link
+
+To: evan@channex.io
+Subject: YourFrontDesk certification, live test video
+
+Hi Evan,
+
+Thank you for the pass on the certification scenarios. The live test video is
+here: <link>
+
+Staging property: Test Property - YourFrontDesk, 06474740-b4e1-4b04-8aea-9660ca7bc56d
+
+The recording shows, in YourFrontDesk and in the Channex staging logs: a one
+night booking created in the PMS (one availability update, that date only), the
+same booking moved a week later (one update carrying the original and the new
+date), and a full sync from the button in the PMS (two calls). It ends with the
+booking cancelled and the night released.
+
+Kind regards,
+Leon Thick
+YourFrontDesk
 
 ---
 

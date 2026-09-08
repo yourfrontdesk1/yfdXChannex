@@ -1,7 +1,8 @@
 import { db } from "./db";
 import { channexRequest } from "./channex";
 import { addDays } from "./dates";
-import type { AriRow, Property, RoomType } from "./types";
+import { applyEffectChange, holdKey, type Effect } from "./holds";
+import type { Property, RoomType } from "./types";
 
 /**
  * Channex webhooks are a notification, not the booking, and they can arrive out
@@ -41,9 +42,6 @@ export type IngestResult = {
   forwarded: boolean;
   error: string | null;
 };
-
-/** One room night held, keyed by our room type and date. */
-type Effect = Record<string, number>;
 
 export async function fetchRevision(revisionId: string, propertyId?: string | null): Promise<BookingRevision | null> {
   const result = await channexRequest<{ data?: { attributes?: BookingRevision } }>(
@@ -199,49 +197,14 @@ async function applyAvailability(
   const priorEffect = (prior?.applied_effect ?? {}) as Effect;
   const nextEffect: Effect = revision.status === "cancelled" ? {} : effectOf(revision, byChannexId);
 
-  const net: Effect = {};
-  for (const [key, held] of Object.entries(priorEffect)) net[key] = (net[key] ?? 0) + held;
-  for (const [key, held] of Object.entries(nextEffect)) net[key] = (net[key] ?? 0) - held;
-
-  const touched = Object.entries(net).filter(([, delta]) => delta !== 0);
-  if (touched.length > 0) {
-    const dates = touched.map(([key]) => key.split("|")[1]).sort();
-    const { data: current } = await supabase
-      .from("ari")
-      .select("*")
-      .eq("property_id", property.id)
-      .is("rate_plan_id", null)
-      .gte("date", dates[0])
-      .lte("date", dates[dates.length - 1]);
-
-    const currentByKey = new Map(
-      ((current ?? []) as AriRow[]).map((r) => [[r.room_type_id, r.date].join("|"), r]),
-    );
-
-    const rows = touched.map(([key, delta]) => {
-      const [roomTypeId, date] = key.split("|");
-      const existing = currentByKey.get(key);
-      const roomType = roomTypes.find((r) => r.id === roomTypeId);
-      const base = existing?.availability ?? roomType?.count_of_rooms ?? 0;
-      const ceiling = roomType?.count_of_rooms ?? base;
-      return {
-        property_id: property.id,
-        room_type_id: roomTypeId,
-        rate_plan_id: null,
-        date,
-        availability: Math.max(0, Math.min(ceiling, base + delta)),
-      };
-    });
-
-    await supabase.from("ari").upsert(rows, { onConflict: "room_type_id,rate_plan_id,date" });
-  }
+  const { touched } = await applyEffectChange(property, priorEffect, nextEffect);
 
   await supabase
     .from("inbound_bookings")
     .update({ applied_at: new Date().toISOString(), applied_effect: nextEffect })
     .eq("revision_id", revisionId);
 
-  return touched.length;
+  return touched;
 }
 
 function effectOf(revision: BookingRevision, byChannexId: Map<string, RoomType>): Effect {
@@ -252,7 +215,7 @@ function effectOf(revision: BookingRevision, byChannexId: Map<string, RoomType>)
     if (!roomType) continue;
     // Nights, so the departure date is never held.
     for (let date = room.checkin_date; date < room.checkout_date; date = addDays(date, 1)) {
-      const key = [roomType.id, date].join("|");
+      const key = holdKey(roomType.id, date);
       effect[key] = (effect[key] ?? 0) + 1;
     }
   }
