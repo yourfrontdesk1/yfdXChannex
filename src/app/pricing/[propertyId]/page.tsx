@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { signedIn, authRequired } from "@/lib/session";
 import { db } from "@/lib/db";
+import { health } from "@/lib/ops";
 import { dateRange, today } from "@/lib/dates";
 
 export const dynamic = "force-dynamic";
@@ -74,6 +75,13 @@ export default async function PricingPage({ params }: { params: Promise<{ proper
     .limit(MOVES);
 
   const nameOf = new Map((roomTypes ?? []).map((r) => [r.id as string, r.name as string]));
+  const ops = await health();
+  const { data: openEscalations } = await supabase
+    .from("escalations")
+    .select("thread_id, reason, message, raised_at")
+    .is("resolved_at", null)
+    .order("raised_at", { ascending: false })
+    .limit(10);
   const lastRun = moves?.[0]?.at ? new Date(moves[0].at as string) : null;
 
   return (
@@ -86,6 +94,45 @@ export default async function PricingPage({ params }: { params: Promise<{ proper
           {lastRun ? ` Last change ${lastRun.toUTCString().replace("GMT", "UTC")}.` : " No changes recorded yet."}
         </p>
       </div>
+
+      <div className="card">
+        <h3>Is everything running</h3>
+        <p className="legend">
+          Eight jobs run unattended. This says when each last worked, and calls it stale when it has been quiet
+          longer than it should be. Machine readable at <code>/api/health</code>.
+        </p>
+        <table className="plain">
+          <thead><tr><th>Job</th><th>Last good run</th><th>State</th></tr></thead>
+          <tbody>
+            {ops.jobs.map((j) => (
+              <tr key={j.job}>
+                <td>{j.job}</td>
+                <td>{j.last_ok ? new Date(j.last_ok).toUTCString().replace("GMT", "UTC") : "never"}</td>
+                <td className={j.stale ? "down" : "up"}>{j.stale ? "stale" : "running"}{j.last_error ? `, last error: ${j.last_error}` : ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {(openEscalations ?? []).length > 0 ? (
+        <div className="card">
+          <h3>Waiting for a person</h3>
+          <p className="legend">The assistant stopped and handed these over rather than answering them.</p>
+          <table className="plain">
+            <thead><tr><th>Raised</th><th>Why</th><th>What the guest said</th></tr></thead>
+            <tbody>
+              {(openEscalations ?? []).map((e, i) => (
+                <tr key={i}>
+                  <td>{new Date(e.raised_at as string).toUTCString().replace("GMT", "UTC")}</td>
+                  <td>{e.reason as string}</td>
+                  <td>{((e.message as string) ?? "").slice(0, 160)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
 
       <div className="card">
         <h3>The fence</h3>

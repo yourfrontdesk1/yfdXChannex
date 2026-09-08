@@ -105,11 +105,24 @@ function leadFactor(daysOut: number, sold: number): number {
   return 1.02;
 }
 
-/** A known event on the night, weighted by how big it is judged to be. */
+/**
+ * A known event on the night, weighted by how big it is judged to be.
+ *
+ * Only real ones count. Gibraltar has something on almost every night, so
+ * lifting every night by two percent moved nothing except the average, which is
+ * noise wearing the costume of a signal. Below the threshold an event is
+ * ignored, and above it the lift is meaningful.
+ */
+const EVENT_THRESHOLD = 6;
+
 function eventFactor(scores: number[]): number {
-  if (scores.length === 0) return 1.0;
-  const best = Math.max(...scores.map((s) => (Number.isFinite(s) ? Math.min(Math.max(s, 0), 10) : 3)));
-  return 1 + best / 100;
+  const real = scores
+    .map((s) => (Number.isFinite(s) ? Math.min(Math.max(s, 0), 10) : 0))
+    .filter((s) => s >= EVENT_THRESHOLD);
+  if (real.length === 0) return 1.0;
+  const best = Math.max(...real);
+  // 6 lifts nothing, 10 lifts a tenth.
+  return 1 + ((best - EVENT_THRESHOLD) / (10 - EVENT_THRESHOLD)) * 0.1;
 }
 
 function portalClient() {

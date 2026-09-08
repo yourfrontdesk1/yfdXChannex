@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authorised } from "@/lib/auth";
 import { flushAll, flushProperty } from "@/lib/outbox";
+import { runJob } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -12,7 +13,9 @@ async function run(request: Request) {
 
   const propertyId = new URL(request.url).searchParams.get("property");
   try {
-    const reports = propertyId ? [await flushProperty(propertyId)] : await flushAll();
+    const reports = await runJob("worker", async () =>
+      propertyId ? [await flushProperty(propertyId)] : await flushAll(),
+    );
     return NextResponse.json({
       ran_at: new Date().toISOString(),
       properties: reports.length,

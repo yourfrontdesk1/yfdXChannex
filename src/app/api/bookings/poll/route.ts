@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { authorised } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { fetchFeed, ingestRevision } from "@/lib/bookings";
+import { runJob } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -24,10 +25,13 @@ async function run(request: Request) {
   }
 
   try {
-    const revisions = await fetchFeed(channexPropertyId);
-    const results = [];
-    for (const revision of revisions) results.push(await ingestRevision(revision));
-    return NextResponse.json({ found: revisions.length, results });
+    const out = await runJob("bookings-poll", async () => {
+      const revisions = await fetchFeed(channexPropertyId);
+      const results = [];
+      for (const revision of revisions) results.push(await ingestRevision(revision));
+      return { found: revisions.length, results };
+    });
+    return NextResponse.json(out);
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authorised } from "@/lib/auth";
 import { priceParkside, type Horizon } from "@/lib/pricing";
+import { runJob, enabled } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -21,7 +22,10 @@ async function run(request: Request) {
     return NextResponse.json({ error: `horizon must be one of near, mid, far, all` }, { status: 400 });
   }
   try {
-    return NextResponse.json(await priceParkside(asked as Horizon));
+    if (!(await enabled("pricing_enabled"))) {
+      return NextResponse.json({ skipped: "pricing_enabled is false in hub_config" });
+    }
+    return NextResponse.json(await runJob(`pricing-${asked}`, () => priceParkside(asked as Horizon)));
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }
