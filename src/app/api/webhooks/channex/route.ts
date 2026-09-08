@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authorised } from "@/lib/auth";
-import { fetchRevision, ingestRevision } from "@/lib/bookings";
+import { db } from "@/lib/db";
+import { fetchRevision, ingestRevision, type BookingRevision } from "@/lib/bookings";
 
 export const dynamic = "force-dynamic";
 
@@ -15,13 +16,18 @@ const BOOKING_EVENTS = new Set([
 ]);
 
 /**
- * Channex send a notification, not the booking, and they say plainly that the
- * calls can arrive out of order. So nothing here reads state out of the webhook
- * body beyond which revision to go and fetch.
+ * Channex send a notification carrying the booking and revision ids, not the
+ * booking itself, and they say plainly that the calls can arrive out of order.
+ * So the revision is fetched by id exactly once per revision: one already
+ * stored and acknowledged is answered without touching Channex, so a repeated
+ * delivery of the same event costs nothing. The webhook is registered on the
+ * three booking events only, never on "*", because the wildcard fires the
+ * generic booking event as well and every revision was being pulled twice.
+ * Should a body ever carry the full revision, it is used as delivered.
  *
  * A 5xx from this endpoint puts Channex into eleven retries over a day, so an
  * ingest failure is answered 200 with the problem in the body and picked up by
- * the feed poller instead.
+ * the feed poller, which runs every fifteen minutes as the backup.
  */
 export async function POST(request: Request) {
   if (!authorised(request, "CHANNEX_WEBHOOK_SECRET")) {
@@ -31,7 +37,7 @@ export async function POST(request: Request) {
   let body: {
     event?: string;
     property_id?: string;
-    payload?: { revision_id?: string; booking_revision_id?: string; booking_id?: string; property_id?: string };
+    payload?: Partial<BookingRevision> & { revision_id?: string; booking_revision_id?: string; booking_id?: string };
   };
   try {
     body = await request.json();
@@ -44,18 +50,33 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, note: `Nothing to do for ${event || "an event with no name"}` });
   }
 
-  const revisionId = body.payload?.revision_id ?? body.payload?.booking_revision_id;
+  const payload = body.payload;
+  const revisionId = payload?.revision_id ?? payload?.booking_revision_id ?? payload?.id;
   if (!revisionId) {
     return NextResponse.json({ ok: true, note: "Event carried no revision id" });
   }
 
   try {
-    const revision = await fetchRevision(revisionId);
+    // Already stored: a repeat delivery of the same revision needs no work.
+    const { data: existing } = await db()
+      .from("inbound_bookings")
+      .select("id, acknowledged_at")
+      .eq("revision_id", revisionId)
+      .maybeSingle();
+    if (existing?.acknowledged_at) {
+      return NextResponse.json({ ok: true, event, note: "Revision already stored and acknowledged" });
+    }
+
+    // With send_data the body is the revision. Only a body without one is fetched.
+    const delivered = payload && typeof payload.status === "string" && typeof payload.property_id === "string" && payload.arrival_date;
+    const revision = delivered
+      ? ({ ...payload, id: payload.id ?? revisionId } as BookingRevision)
+      : await fetchRevision(revisionId);
     if (!revision) {
       return NextResponse.json({ ok: true, note: "Revision could not be pulled, the feed will retry it" });
     }
     const result = await ingestRevision(revision);
-    return NextResponse.json({ ok: true, event, result });
+    return NextResponse.json({ ok: true, event, source: delivered ? "webhook body" : "fetched by id", result });
   } catch (e) {
     return NextResponse.json({
       ok: true,
