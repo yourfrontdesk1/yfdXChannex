@@ -146,6 +146,17 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
   const sellingPlanOf = new Map(
     (plans ?? []).filter((p) => p.ota_rate_plan_code).map((p) => [p.room_type_id as string, p.id as string]),
   );
+  // Plans with no OTA code of their own still get a price. A non refundable sits
+  // a tenth under the flexible rate, which is what the discount is for: the guest
+  // gives up the right to cancel and pays less for it. Leaving them holding seed
+  // numbers is how a fake price gets published the day someone maps them.
+  const NON_REFUNDABLE_DISCOUNT = 0.9;
+  const derivedPlansOf = new Map<string, string[]>();
+  for (const plan of plans ?? []) {
+    if (plan.ota_rate_plan_code) continue;
+    const key = plan.room_type_id as string;
+    derivedPlansOf.set(key, [...(derivedPlansOf.get(key) ?? []), plan.id as string]);
+  }
 
   // Availability and the current price, both paged: PostgREST stops at a
   // thousand rows and this window is bigger than that.
@@ -303,6 +314,13 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
       if (was !== undefined && was !== null && Math.round(was) === price) { unchanged++; continue; }
 
       rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: rt.id as string, rate_plan_id: planId, date, rate: price });
+
+      for (const derivedId of derivedPlansOf.get(rt.id as string) ?? []) {
+        const derived = Math.round(Math.max(floor, price * NON_REFUNDABLE_DISCOUNT));
+        const derivedWas = currentPrice.get(`${derivedId}|${date}`);
+        if (derivedWas !== undefined && derivedWas !== null && Math.round(derivedWas) === derived) continue;
+        rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: rt.id as string, rate_plan_id: derivedId, date, rate: derived });
+      }
       logs.push({
         property_id: PARKSIDE_PROPERTY_ID,
         room_type_id: rt.id,
