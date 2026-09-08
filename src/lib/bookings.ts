@@ -294,7 +294,23 @@ async function forwardToGuestPortal(property: Property, revision: BookingRevisio
   if (!key) return false;
 
   const cancelled = String(revision.status).toLowerCase() === "cancelled";
-  const externalRef = revision.ota_reservation_code ?? revision.unique_id ?? revision.booking_id ?? revisionId;
+
+  // The portal already holds Parkside bookings from the old feed, referenced as
+  // BDC-6639721282 and HBD-1114132-... Channex hands us the bare number. Send it
+  // bare and the same guest arrives twice under two references, with two
+  // payment links. Matching the convention means whichever feed arrives second
+  // updates the booking instead of creating a rival.
+  const OTA_PREFIX: Record<string, string> = {
+    bookingcom: "BDC",
+    "booking.com": "BDC",
+    hotelbeds: "HBD",
+    expedia: "EXP",
+    airbnb: "ABB",
+    agoda: "AGD",
+  };
+  const rawRef = revision.ota_reservation_code ?? revision.unique_id ?? revision.booking_id ?? revisionId;
+  const prefix = OTA_PREFIX[String(revision.ota_name ?? "").toLowerCase().replace(/\s+/g, "")];
+  const externalRef = prefix && !String(rawRef).includes("-") ? `${prefix}-${rawRef}` : rawRef;
   const room = revision.rooms?.[0];
 
   // Channex names a room type by uuid. The portal shows this to staff, so it
