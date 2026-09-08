@@ -80,7 +80,8 @@ export default async function Home() {
                       )}
                     </td>
                     <td>
-                      <Link href={`/grid/${p.id}`}>Open grid</Link>
+                      <Link href={`/grid/${p.id}`}>Open grid</Link>{" "}
+                      <Link href={`/pricing/${p.id}`}>What pricing is doing</Link>
                     </td>
                   </tr>
                 );

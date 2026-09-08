@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { db } from "./db";
-import { PARKSIDE_PROPERTY_ID } from "./parkside";
+import { PARKSIDE_PROPERTY_ID, PARKSIDE_ROOMS } from "./parkside";
 
 /**
  * What a night is worth.
@@ -35,12 +35,43 @@ export type PricingResult = {
   unchanged: number;
   at_floor: number;
   at_ceiling: number;
+  damped: number;
   average: number | null;
   error: string | null;
 };
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const addDays = (d: Date, n: number) => new Date(d.getTime() + n * 86400000);
+
+/**
+ * Pace. The single most useful idea worth taking from the revenue management
+ * tools: a night is not cheap or dear because of how full it is, but because of
+ * how full it is *compared with how full this hotel normally is at the same
+ * distance out*. Sixty percent sold is strong at ninety days and weak at three.
+ *
+ * The curve is built from this building's own history, so it needs no outside
+ * feed and no subscription.
+ */
+function paceFactor(sold: number, typical: number | undefined): number {
+  if (typical === undefined || typical <= 0.02) return 1.0;
+  const ratio = sold / typical;
+  if (ratio >= 1.5) return 1.08;
+  if (ratio >= 1.15) return 1.04;
+  if (ratio <= 0.5) return 0.94;
+  if (ratio <= 0.85) return 0.97;
+  return 1.0;
+}
+
+/**
+ * An orphan night: one or two free nights boxed in by sold ones. Almost nobody
+ * is looking for exactly that stay, so it goes at a discount rather than sitting
+ * there being the reason a room type shows as available and never sells.
+ */
+function orphanFactor(free: number, freeBefore: number, freeAfter: number): number {
+  if (free <= 0) return 1.0;
+  if (freeBefore === 0 && freeAfter === 0) return 0.88;
+  return 1.0;
+}
 
 /**
  * The last unit of a room type is worth more than the first. Sold is the share
@@ -142,8 +173,51 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
     }
   }
 
+  // How full this building normally is, by distance from arrival. Built from a
+  // year of its own bookings, using when each one was made.
+  const portal = portalClient();
+  const yearAgo = iso(addDays(today, -365));
+  const { data: apartments } = await portal.from("properties").select("id").in("room_number", PARKSIDE_ROOMS);
+  const apartmentIds = (apartments ?? []).map((a) => a.id as string);
+  const { data: history } = await portal
+    .from("bookings")
+    .select("check_in, check_out, created_at, status, is_active, no_show")
+    .gte("check_in", yearAgo)
+    .lt("check_in", iso(today))
+    .in("property_id", apartmentIds.length ? apartmentIds : ["none"]);
+  const soldByLead = new Map<number, { sold: number; of: number }>();
+  const nightsSeen = new Map<string, { total: number; leads: number[] }>();
+  for (const b of history ?? []) {
+    if (!b.is_active || b.status === "cancelled" || b.no_show || !b.check_in || !b.check_out || !b.created_at) continue;
+    const made = new Date(b.created_at as string);
+    for (let d = new Date(`${b.check_in}T00:00:00Z`); iso(d) < (b.check_out as string); d = addDays(d, 1)) {
+      const key = iso(d);
+      const lead = Math.max(0, Math.round((d.getTime() - made.getTime()) / 86400000));
+      if (!nightsSeen.has(key)) nightsSeen.set(key, { total: 0, leads: [] });
+      const night = nightsSeen.get(key)!;
+      night.total++;
+      night.leads.push(lead);
+    }
+  }
+  // For each distance out, the share of a night's eventual bookings that were
+  // already made by then, averaged over every night in the year.
+  const UNITS = 12;
+  for (let lead = 0; lead <= 365; lead++) {
+    let sold = 0;
+    let of = 0;
+    for (const night of nightsSeen.values()) {
+      sold += night.leads.filter((l) => l >= lead).length;
+      of += UNITS;
+    }
+    soldByLead.set(lead, { sold, of });
+  }
+  const typicalSoldAt = (lead: number) => {
+    const row = soldByLead.get(Math.min(365, Math.max(0, lead)));
+    return row && row.of > 0 ? row.sold / row.of : undefined;
+  };
+
   // Events are Gibraltar wide, so they lift every room type on the night.
-  const { data: events } = await portalClient()
+  const { data: events } = await portal
     .from("gib_events")
     .select("start_date, end_date, impact_score")
     .not("start_date", "is", null)
@@ -168,6 +242,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
   const rows: { property_id: string; room_type_id: string; rate_plan_id: string; date: string; rate: number }[] = [];
   const logs: Record<string, unknown>[] = [];
   let unchanged = 0;
+  let damped = 0;
   let atFloor = 0;
   let atCeiling = 0;
   let considered = 0;
@@ -194,18 +269,37 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
       const occupancy = occupancyFactor(sold);
       const compression = compressionFactor(buildingSold);
       const lead = leadFactor(daysOut, sold);
+      const pace = paceFactor(sold, typicalSoldAt(daysOut));
+      const orphan = orphanFactor(
+        free,
+        availability.get(`${rt.id}|${iso(addDays(new Date(`${date}T00:00:00Z`), -1))}`) ?? 1,
+        availability.get(`${rt.id}|${iso(addDays(new Date(`${date}T00:00:00Z`), 1))}`) ?? 1,
+      );
 
-      const raw = Number(rule.base_rate) * occupancy * compression * lead * evented;
+      const raw = Number(rule.base_rate) * occupancy * compression * lead * evented * pace * orphan;
       const floor = Number(rule.floor_rate);
       const ceiling = Number(rule.ceiling_rate);
-      const price = Math.round(Math.min(ceiling, Math.max(floor, raw)));
+      const target = Math.round(Math.min(ceiling, Math.max(floor, raw)));
+
+      // Nothing lurches. A night walks toward what it is worth a few percent at
+      // a time, so a listing never jumps in front of a guest who is watching it
+      // and Booking.com never sees a price spasm.
+      const was = currentPrice.get(`${planId}|${date}`);
+      const step = Number(rule.max_step_pct ?? 5) / 100;
+      let price = target;
+      if (was !== undefined && was !== null && was > 0) {
+        const highest = Math.round(was * (1 + step));
+        const lowest = Math.round(was * (1 - step));
+        price = Math.min(highest, Math.max(lowest, target));
+        price = Math.round(Math.min(ceiling, Math.max(floor, price)));
+        if (price !== target) damped++;
+      }
 
       considered++;
       sum += price;
       if (price === Math.round(floor)) atFloor++;
       if (price === Math.round(ceiling)) atCeiling++;
 
-      const was = currentPrice.get(`${planId}|${date}`);
       if (was !== undefined && was !== null && Math.round(was) === price) { unchanged++; continue; }
 
       rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: rt.id as string, rate_plan_id: planId, date, rate: price });
@@ -215,7 +309,11 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
         date,
         price,
         previous: was ?? null,
-        factors: { base: Number(rule.base_rate), sold, occupancy, compression, lead, event: evented, days_out: daysOut, raw: Math.round(raw) },
+        factors: {
+          base: Number(rule.base_rate), sold, occupancy, compression, lead, pace, orphan,
+          event: evented, days_out: daysOut, raw: Math.round(raw), target,
+          typical_sold_at_lead: typicalSoldAt(daysOut) ?? null,
+        },
       });
     }
   }
@@ -237,6 +335,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
     unchanged,
     at_floor: atFloor,
     at_ceiling: atCeiling,
+    damped,
     average: considered === 0 ? null : Math.round(sum / considered),
     error: null,
   };

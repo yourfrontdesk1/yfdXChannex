@@ -15,7 +15,7 @@ import { db } from "./db";
 export const PARKSIDE_PROPERTY_ID = "3d9abd18-4ce4-4703-9cdd-7c879db8637f";
 export const SYNC_DAYS = 500;
 
-const PARKSIDE_ROOMS = ["3.17A", "4.17A", "8.17A", "1.11", "2.05", "7.08", "7.18", "9.17B", "1.14", "3.17B", "4.17B", "2.17"];
+export const PARKSIDE_ROOMS = ["3.17A", "4.17A", "8.17A", "1.11", "2.05", "7.08", "7.18", "9.17B", "1.14", "3.17B", "4.17B", "2.17"];
 
 /** Our room type name, against the type the portal records on an apartment. */
 const PORTAL_TYPE_OF: Record<string, string> = {

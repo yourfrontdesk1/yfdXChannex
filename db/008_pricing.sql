@@ -29,3 +29,9 @@ create table if not exists pricing_log (
   at timestamptz not null default now()
 );
 create index if not exists pricing_log_date_idx on pricing_log(property_id, date, at desc);
+
+-- How far a price may travel in one pass. A rate that jumps from 87 to 128 in a
+-- single hour is a shock to anyone watching the listing and to Booking.com's
+-- ranking of it. Capping the step lets a night climb toward what it is worth
+-- over a few hours instead, and lets it fall back the same way.
+alter table pricing_rules add column if not exists max_step_pct numeric(5,2) not null default 5.00;
