@@ -27,14 +27,70 @@ function firstName(full: string | null): string {
   return name && name.length > 1 ? name : "there";
 }
 
-/** Short, human, and the portal link is the only link in it. */
-export function welcomeMessage(guestName: string | null, portalUrl: string): string {
-  return [
-    `Hi ${firstName(guestName)}, thanks for booking with Victory Suites.`,
-    `Here is your guest portal link, everything for your stay lives on it: ${portalUrl}`,
-    `Complete your payment and check in there, and your arrival details will appear on the same link.`,
-    `Any questions, just reply here.`,
-  ].join(" ");
+/** Tuesday 8 September 2026, the way the message has always read. */
+function longDate(date: string | null): string {
+  if (!date) return "";
+  // en-GB puts a comma after the weekday. The message Leon sends does not.
+  return new Date(`${date}T00:00:00Z`)
+    .toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })
+    .replace(",", "");
+}
+
+function money(amount: number | null, currency: string | null): string | null {
+  if (amount === null || amount === undefined) return null;
+  return `${currency ?? "GBP"} ${amount.toFixed(2)}`;
+}
+
+/**
+ * The message Victory Suites already sends, word for word. It was written by
+ * Leon and it works, so it is reproduced rather than improved on: the portal
+ * link, the three things the guest has to do, the reassurance about payment,
+ * their dates, their total, and a way to reach a person.
+ */
+export function welcomeMessage(booking: {
+  guest_name: string | null;
+  portal_url: string;
+  arrival_date: string | null;
+  departure_date: string | null;
+  amount: number | null;
+  currency: string | null;
+}): string {
+  const full = (booking.guest_name ?? "").trim() || "there";
+  const total = money(booking.amount, booking.currency);
+
+  const lines = [
+    `Hi ${full},`,
+    ``,
+    `Thank you for booking with Victory Suites!`,
+    ``,
+    `To complete your check-in and payment, please use the secure guest portal link below.`,
+    ``,
+    booking.portal_url,
+    ``,
+    `You will need to:`,
+    `1. Upload your passport or ID`,
+    `2. Confirm your details`,
+    `3. Complete payment on the final step`,
+    ``,
+    `Payment can be made at any time before your arrival. There is no rush.`,
+    ``,
+    `Check-in: ${longDate(booking.arrival_date)} 15:00`,
+    `Check-out: ${longDate(booking.departure_date)}`,
+  ];
+
+  if (total) lines.push(``, `Total: ${total}`);
+
+  lines.push(
+    ``,
+    `If you have any questions ${firstName(booking.guest_name)}, feel free to message us on WhatsApp at +350 56020139.`,
+    ``,
+    `We look forward to welcoming you ${full}!`,
+    ``,
+    `Best regards,`,
+    `Victory Suites`,
+  );
+
+  return lines.join("\n");
 }
 
 async function threadFor(channexPropertyId: string, bookingId: string | null, otaRef: string | null): Promise<string | null> {
@@ -56,7 +112,7 @@ export async function sendPendingGuestLinks(): Promise<LinkSendResult> {
 
   const { data: waiting, error } = await supabase
     .from("inbound_bookings")
-    .select("id, revision_id, channex_booking_id, ota_reservation_code, guest_name, portal_url, status, property_id")
+    .select("id, revision_id, channex_booking_id, ota_reservation_code, guest_name, portal_url, status, property_id, arrival_date, departure_date, amount, currency")
     .is("link_sent_at", null)
     .not("portal_url", "is", null)
     .neq("status", "cancelled")
@@ -87,7 +143,16 @@ export async function sendPendingGuestLinks(): Promise<LinkSendResult> {
     const sent = await channexRequest(
       "POST",
       `/message_threads/${threadId}/messages`,
-      { message: welcomeMessage(booking.guest_name as string | null, booking.portal_url as string) },
+      {
+        message: welcomeMessage({
+          guest_name: (booking.guest_name as string | null) ?? null,
+          portal_url: booking.portal_url as string,
+          arrival_date: (booking.arrival_date as string | null) ?? null,
+          departure_date: (booking.departure_date as string | null) ?? null,
+          amount: booking.amount === null || booking.amount === undefined ? null : Number(booking.amount),
+          currency: (booking.currency as string | null) ?? null,
+        }),
+      },
     );
 
     if (!sent.ok) {
