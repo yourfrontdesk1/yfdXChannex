@@ -297,6 +297,18 @@ async function forwardToGuestPortal(property: Property, revision: BookingRevisio
   const externalRef = revision.ota_reservation_code ?? revision.unique_id ?? revision.booking_id ?? revisionId;
   const room = revision.rooms?.[0];
 
+  // Channex names a room type by uuid. The portal shows this to staff, so it
+  // gets the words a person uses, "Executive Studio", not an identifier.
+  let roomName: string | null = null;
+  if (room?.room_type_id) {
+    const { data: roomType } = await supabase
+      .from("room_types")
+      .select("name")
+      .eq("channex_room_type_id", room.room_type_id)
+      .maybeSingle();
+    roomName = (roomType?.name as string | null) ?? null;
+  }
+
   const body: Record<string, unknown> = cancelled
     ? { status: "cancelled", external_ref: externalRef }
     : {
@@ -311,7 +323,8 @@ async function forwardToGuestPortal(property: Property, revision: BookingRevisio
         amount: revision.amount ? Number(revision.amount) : undefined,
         currency: revision.currency ?? "GBP",
         external_ref: externalRef,
-        room_name: room?.room_type_id ?? null,
+        room_name: roomName,
+        room_type: roomName,
         ota_status: revision.status,
         sending_system: "channex",
         nightly_rates: revision.rooms ?? null,
