@@ -110,12 +110,18 @@ export async function sendPendingGuestLinks(): Promise<LinkSendResult> {
   const supabase = db();
   const result: LinkSendResult = { considered: 0, sent: 0, no_thread: 0, failed: 0, errors: [] };
 
+  // Everything before the production cutover is certification data. It must
+  // never be messaged, the same rule the forward retry follows.
+  const { data: cutoverRow } = await supabase.from("hub_config").select("value").eq("key", "forward_cutover_at").maybeSingle();
+  const cutover = (cutoverRow?.value as string) ?? new Date().toISOString();
+
   const { data: waiting, error } = await supabase
     .from("inbound_bookings")
     .select("id, revision_id, channex_booking_id, ota_reservation_code, guest_name, portal_url, status, property_id, arrival_date, departure_date, amount, currency")
     .is("link_sent_at", null)
     .not("portal_url", "is", null)
     .neq("status", "cancelled")
+    .gte("received_at", cutover)
     .limit(25);
   if (error) throw new Error(`Reading bookings: ${error.message}`);
 
