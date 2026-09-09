@@ -76,6 +76,17 @@ export default async function PricingPage({ params }: { params: Promise<{ proper
 
   const nameOf = new Map((roomTypes ?? []).map((r) => [r.id as string, r.name as string]));
   const ops = await health();
+  const { data: lastBacktest } = await supabase
+    .from("job_runs")
+    .select("detail, ran_at")
+    .eq("job", "backtest")
+    .eq("ok", true)
+    .order("ran_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const bt = (lastBacktest?.detail ?? null) as
+    | { nights: number; days_back: number; sold_out_nights: number; sold_out_underpriced: number; sold_out_gap_per_night: number | null; average_achieved: number | null; average_engine_ask: number | null }
+    | null;
   const { data: openEscalations } = await supabase
     .from("escalations")
     .select("thread_id, reason, message, raised_at")
@@ -134,6 +145,26 @@ export default async function PricingPage({ params }: { params: Promise<{ proper
               ))}
             </tbody>
           </table>
+        </div>
+      ) : null}
+
+      {bt ? (
+        <div className="card">
+          <h3>Does this beat a flat price</h3>
+          <p className="legend">
+            Replayed over the last {bt.days_back} days against what was actually charged. It is a diagnostic, not a
+            promise: nobody can know whether a higher price would still have sold.
+          </p>
+          <p>
+            Across <strong>{bt.nights}</strong> room type nights, <strong>{bt.sold_out_nights}</strong> sold out
+            completely. On <strong>{bt.sold_out_underpriced}</strong> of those the engine would have asked more than
+            was charged, by <strong>£{bt.sold_out_gap_per_night ?? 0}</strong> a night on average.
+          </p>
+          <p className="legend">
+            Average charged £{bt.average_achieved ?? 0}, average the engine would have asked £{bt.average_engine_ask ?? 0}.
+            The same on average and different where it counts, which is the whole idea: more on the nights that were
+            always going to fill, less on the ones that were not.
+          </p>
         </div>
       ) : null}
 

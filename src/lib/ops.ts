@@ -52,6 +52,7 @@ const EXPECTED_GAP_MINUTES: Record<string, number> = {
   "send-links": 30,
   "answer-messages": 20,
   "retry-forward": 45,
+  backtest: 2880,
 };
 
 /**

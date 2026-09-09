@@ -35,6 +35,10 @@
     {
       "path": "/api/bookings/retry",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/pricing/backtest",
+      "schedule": "20 4 * * *"
     }
   ]
 }
