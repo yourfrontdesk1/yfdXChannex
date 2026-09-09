@@ -115,17 +115,35 @@ export async function sendPendingGuestLinks(): Promise<LinkSendResult> {
   const { data: cutoverRow } = await supabase.from("hub_config").select("value").eq("key", "forward_cutover_at").maybeSingle();
   const cutover = (cutoverRow?.value as string) ?? new Date().toISOString();
 
-  const { data: waiting, error } = await supabase
+  // One booking, not one revision. A stay that is booked and then amended
+  // arrives as several revisions, and a guest who receives their link twice
+  // learns that nobody is really watching.
+  const { data: revisions, error } = await supabase
     .from("inbound_bookings")
-    .select("id, revision_id, channex_booking_id, ota_reservation_code, guest_name, portal_url, status, property_id, arrival_date, departure_date, amount, currency")
-    .is("link_sent_at", null)
-    .not("portal_url", "is", null)
-    .neq("status", "cancelled")
+    .select("id, revision_id, channex_booking_id, ota_reservation_code, guest_name, portal_url, status, property_id, arrival_date, departure_date, amount, currency, received_at, link_sent_at")
     .gte("received_at", cutover)
-    .limit(25);
+    .order("received_at", { ascending: false })
+    .limit(200);
   if (error) throw new Error(`Reading bookings: ${error.message}`);
 
-  for (const booking of waiting ?? []) {
+  const latestOf = new Map<string, (typeof revisions)[number]>();
+  const alreadySent = new Set<string>();
+  const cancelled = new Set<string>();
+  for (const row of revisions ?? []) {
+    const key = (row.channex_booking_id as string) ?? (row.revision_id as string);
+    if (row.link_sent_at) alreadySent.add(key);
+    if (String(row.status).toLowerCase() === "cancelled") cancelled.add(key);
+    // Only a revision that came back with a portal link can be sent, but every
+    // revision counts when deciding whether the booking still stands.
+    if (row.portal_url && !latestOf.has(key)) latestOf.set(key, row);
+  }
+
+  const waiting = [...latestOf.entries()]
+    .filter(([key]) => !alreadySent.has(key) && !cancelled.has(key))
+    .map(([, row]) => row)
+    .slice(0, 25);
+
+  for (const booking of waiting) {
     result.considered++;
 
     const { data: property } = await supabase
@@ -167,7 +185,12 @@ export async function sendPendingGuestLinks(): Promise<LinkSendResult> {
       continue;
     }
 
-    await supabase.from("inbound_bookings").update({ link_sent_at: new Date().toISOString() }).eq("id", booking.id as string);
+    // Stamped on every revision of the booking, so a later amendment cannot
+    // send the link a second time.
+    await supabase
+      .from("inbound_bookings")
+      .update({ link_sent_at: new Date().toISOString() })
+      .eq("channex_booking_id", booking.channex_booking_id as string);
     result.sent++;
   }
 
