@@ -112,17 +112,30 @@ function orphanFactor(free: number, freeBefore: number, freeAfter: number): numb
  * of that room type already gone for the night.
  */
 function occupancyFactor(sold: number): number {
-  if (sold <= 0.15) return 0.92;
-  if (sold <= 0.4) return 0.97;
-  if (sold <= 0.6) return 1.02;
-  if (sold <= 0.8) return 1.1;
-  return 1.22;
+  // Wider than it was, deliberately. The old spread ran 0.92 to 1.22, a range of
+  // thirty percent across a completely empty night and a nearly full one, which
+  // is a rate card with a slight opinion rather than a price that responds. An
+  // empty night four weeks out is worth cutting hard, because an unsold night
+  // earns nothing at all, and the last room on a full night is worth what
+  // somebody will pay for the last room.
+  if (sold <= 0.15) return 0.78;
+  if (sold <= 0.3) return 0.86;
+  if (sold <= 0.45) return 0.94;
+  if (sold <= 0.6) return 1.04;
+  if (sold <= 0.75) return 1.16;
+  if (sold <= 0.9) return 1.32;
+  return 1.5;
 }
 
 /** When the whole building is filling, the room type stops being the only signal. */
 function compressionFactor(buildingSold: number): number {
-  if (buildingSold >= 0.85) return 1.08;
-  if (buildingSold >= 0.7) return 1.04;
+  // The building filling is the strongest signal there is, because it means the
+  // town is busy rather than just this room type. It cuts both ways: a dead week
+  // across every apartment is not a week to hold out on.
+  if (buildingSold >= 0.9) return 1.18;
+  if (buildingSold >= 0.8) return 1.1;
+  if (buildingSold >= 0.65) return 1.04;
+  if (buildingSold <= 0.2) return 0.92;
   return 1.0;
 }
 
