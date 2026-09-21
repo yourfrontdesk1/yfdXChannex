@@ -44,7 +44,9 @@ export type JobHealth = { job: string; last_ok: string | null; last_run: string 
 /** How long each job may go quiet before silence itself is the problem. */
 const EXPECTED_GAP_MINUTES: Record<string, number> = {
   worker: 20,
-  "availability-sync": 90,
+  // Runs every five minutes, so ninety would let eighteen runs go missing
+  // before anyone heard about it. Four is enough to know something is wrong.
+  "availability-sync": 20,
   "pricing-near": 150,
   "pricing-mid": 150,
   "pricing-far": 1560,

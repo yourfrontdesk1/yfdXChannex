@@ -10,7 +10,7 @@
     },
     {
       "path": "/api/availability/sync",
-      "schedule": "7,37 * * * *"
+      "schedule": "*/5 * * * *"
     },
     {
       "path": "/api/pricing/run?horizon=near",

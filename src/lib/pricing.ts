@@ -5,7 +5,7 @@ import { PARKSIDE_PROPERTY_ID, PARKSIDE_ROOMS } from "./parkside";
 /**
  * What a night is worth.
  *
- * These twelve apartments have never really been priced. Looking at what they
+ * These fourteen apartments have never really been priced. Looking at what they
  * actually achieved, day of week moves the rate by three percent and the season
  * barely moves it at all, which is not a market with no shape, it is a flat
  * price list. So the shape here comes from the two things that genuinely change:
@@ -36,9 +36,23 @@ export type PricingResult = {
   at_floor: number;
   at_ceiling: number;
   damped: number;
+  ladder_lifted: number;
   average: number | null;
   error: string | null;
 };
+
+/**
+ * The studio ladder, cheapest first.
+ *
+ * Each room type prices off its own availability, which is right on its own and
+ * wrong in a shop window. On a night where all three balcony studios are gone
+ * and the five executive studios are empty, the engine pushes the studio up and
+ * the executive studio down, and Booking.com then shows the larger flat for
+ * forty pounds less than the smaller one on the same page. No rung is allowed
+ * to sit below the rung beneath it. The one and two bedroom flats are left out:
+ * they are different products with their own demand, not steps on this ladder.
+ */
+const LADDER = ["Standard Studio", "Studio Apartment", "Executive Studio"] as const;
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const addDays = (d: Date, n: number) => new Date(d.getTime() + n * 86400000);
@@ -267,6 +281,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
   const logs: Record<string, unknown>[] = [];
   let unchanged = 0;
   let damped = 0;
+  let ladderLifted = 0;
   let atFloor = 0;
   let atCeiling = 0;
   let considered = 0;
@@ -280,6 +295,17 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
     const buildingSold = totalUnits === 0 ? 0 : 1 - freeInBuilding / totalUnits;
     const daysOut = Math.round((Date.parse(`${date}T00:00:00Z`) - today.getTime()) / 86400000);
     const evented = eventFactor(eventsOn.get(date) ?? []);
+
+    const priced: {
+      rtId: string;
+      planId: string;
+      name: string;
+      price: number;
+      floor: number;
+      ceiling: number;
+      was: number | null | undefined;
+      log: Record<string, unknown>;
+    }[] = [];
 
     for (const rt of roomTypes ?? []) {
       const rule = ruleOf.get(rt.id as string);
@@ -319,33 +345,61 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
         if (price !== target) damped++;
       }
 
-      considered++;
-      sum += price;
-      if (price === Math.round(floor)) atFloor++;
-      if (price === Math.round(ceiling)) atCeiling++;
-
-      if (was !== undefined && was !== null && Math.round(was) === price) { unchanged++; continue; }
-
-      rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: rt.id as string, rate_plan_id: planId, date, rate: price });
-
-      for (const derivedId of derivedPlansOf.get(rt.id as string) ?? []) {
-        const derived = Math.round(Math.max(floor, price * NON_REFUNDABLE_DISCOUNT));
-        const derivedWas = currentPrice.get(`${derivedId}|${date}`);
-        if (derivedWas !== undefined && derivedWas !== null && Math.round(derivedWas) === derived) continue;
-        rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: rt.id as string, rate_plan_id: derivedId, date, rate: derived });
-      }
-      logs.push({
-        property_id: PARKSIDE_PROPERTY_ID,
-        room_type_id: rt.id,
-        date,
+      priced.push({
+        rtId: rt.id as string,
+        planId,
+        name: rt.name as string,
         price,
-        previous: was ?? null,
-        factors: {
-          base: Number(rule.base_rate), sold, occupancy, compression, lead, pace, orphan,
-          event: evented, days_out: daysOut, raw: Math.round(raw), target,
-          typical_sold_at_lead: typicalSoldAt(daysOut) ?? null,
+        floor,
+        ceiling,
+        was,
+        log: {
+          property_id: PARKSIDE_PROPERTY_ID,
+          room_type_id: rt.id,
+          date,
+          price,
+          previous: was ?? null,
+          factors: {
+            base: Number(rule.base_rate), sold, occupancy, compression, lead, pace, orphan,
+            event: evented, days_out: daysOut, raw: Math.round(raw), target,
+            typical_sold_at_lead: typicalSoldAt(daysOut) ?? null,
+          },
         },
       });
+    }
+
+    // Walk the ladder upward, so a lift on one rung carries to the next.
+    for (let i = 1; i < LADDER.length; i++) {
+      const lower = priced.find((p) => p.name === LADDER[i - 1]);
+      const upper = priced.find((p) => p.name === LADDER[i]);
+      if (!lower || !upper || upper.price >= lower.price) continue;
+      // Its own ceiling still wins. Better a narrow gap than a rate we said we
+      // would never exceed.
+      const lifted = Math.round(Math.min(upper.ceiling, lower.price));
+      if (lifted === upper.price) continue;
+      (upper.log.factors as Record<string, unknown>).ladder_lifted_from = upper.price;
+      upper.price = lifted;
+      upper.log.price = lifted;
+      ladderLifted++;
+    }
+
+    for (const p of priced) {
+      considered++;
+      sum += p.price;
+      if (p.price === Math.round(p.floor)) atFloor++;
+      if (p.price === Math.round(p.ceiling)) atCeiling++;
+
+      if (p.was !== undefined && p.was !== null && Math.round(p.was) === p.price) { unchanged++; continue; }
+
+      rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: p.rtId, rate_plan_id: p.planId, date, rate: p.price });
+
+      for (const derivedId of derivedPlansOf.get(p.rtId) ?? []) {
+        const derived = Math.round(Math.max(p.floor, p.price * NON_REFUNDABLE_DISCOUNT));
+        const derivedWas = currentPrice.get(`${derivedId}|${date}`);
+        if (derivedWas !== undefined && derivedWas !== null && Math.round(derivedWas) === derived) continue;
+        rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: p.rtId, rate_plan_id: derivedId, date, rate: derived });
+      }
+      logs.push(p.log);
     }
   }
 
@@ -367,6 +421,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
     at_floor: atFloor,
     at_ceiling: atCeiling,
     damped,
+    ladder_lifted: ladderLifted,
     average: considered === 0 ? null : Math.round(sum / considered),
     error: null,
   };
