@@ -360,7 +360,9 @@ async function forwardToYourFrontDesk(property: Property, revision: BookingRevis
   if (event !== "booking.cancelled" && roomType) {
     const pick = await pickFreeApartment(roomType, revision.arrival_date, revision.departure_date);
     apartment = pick.room;
-    roomNote = pick.reason;
+    // The order is kept even on success, so a question about why a guest got a
+    // particular flat can be answered rather than guessed at.
+    roomNote = pick.reason ?? (pick.order.length ? `rotation: ${pick.order.join(", ")}` : null);
   }
 
   const body = {

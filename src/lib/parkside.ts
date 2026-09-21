@@ -105,7 +105,7 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
   for (const b of held) {
     const type = typeOfApartment.get(b.property_id as string);
     if (!type) continue;
-    for (let d = new Date(`${b.check_in}T00:00:00Z`); iso(d) < (b.check_out as string); d = addDays(d, 1)) {
+    for (let d = new Date(`${b.check_in}T00:00:00Z`); iso(d) < b.check_out; d = addDays(d, 1)) {
       const key = iso(d);
       if (key < from || key > to) continue;
       if (!soldOn.has(key)) soldOn.set(key, {});
@@ -176,72 +176,105 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
 }
 
 /**
- * Picks the actual apartment a booking becomes.
+ * Picks the actual apartment a booking becomes, and rotates them.
  *
  * Channex sells a room type. The guest portal does NOT choose a flat: it only
  * resolves one if the caller names it, and its reply carries no room at all. So
  * if nobody picks, the booking reaches the portal, mints a link and messages the
  * guest, then attaches to no apartment anywhere. That is the quietest possible
- * failure and it was sitting in this path until it was caught.
+ * failure and it sat in this path until it was caught.
  *
- * The choice is made here because this service already knows, night by night,
- * which units of a type are free, and it reads that from the portal itself so it
- * cannot disagree with the place the booking is going.
+ * Which free flat gets it matters more than it first appears. Over the ninety
+ * days to 21 September the executive studios ranged from 91 nights sold to 45,
+ * and the one beds from 84 to 61. These apartments have different owners on
+ * different splits, so an uneven hand out is uneven income as much as it is
+ * uneven wear.
  *
- * Least recently occupied first, so stays spread across the flats instead of
- * piling onto whichever one happens to sort first.
+ * So the order is a rotation: fewest nights sold in the recent window first, and
+ * where two are level, whichever has been empty longest. Left alone it pulls the
+ * quiet flats up towards the busy ones rather than holding a gap open.
  */
+const ROTATION_WINDOW_DAYS = 90;
+
 export async function pickFreeApartment(
   roomTypeName: string,
   checkIn: string,
   checkOut: string,
-): Promise<{ room: string | null; considered: number; reason: string | null }> {
+): Promise<{ room: string | null; considered: number; reason: string | null; order: string[] }> {
   const rooms = ROOMS_BY_TYPE[roomTypeName];
-  if (!rooms) return { room: null, considered: 0, reason: `No apartments are declared for "${roomTypeName}"` };
+  if (!rooms) return { room: null, considered: 0, reason: `No apartments are declared for "${roomTypeName}"`, order: [] };
 
   const portal = portalClient();
   const { data: apartments, error: aptError } = await portal
     .from("properties")
     .select("id, room_number")
     .in("room_number", rooms);
-  if (aptError) return { room: null, considered: 0, reason: `Portal apartments: ${aptError.message}` };
-  if (!apartments?.length) return { room: null, considered: 0, reason: "The portal returned none of these apartments" };
+  if (aptError) return { room: null, considered: 0, reason: `Portal apartments: ${aptError.message}`, order: [] };
+  if (!apartments?.length) return { room: null, considered: 0, reason: "The portal returned none of these apartments", order: [] };
+
+  const ids = apartments.map((a) => a.id as string);
 
   // A stay holds from check in up to, but not including, check out, so two
   // bookings may share a date: one leaving, one arriving.
-  const { data: bookings, error: bookingError } = await portal
+  const { data: clashes, error: clashError } = await portal
     .from("bookings")
     .select("property_id, check_in, check_out, status, is_active, no_show")
-    .in("property_id", apartments.map((a) => a.id))
+    .in("property_id", ids)
     .lt("check_in", checkOut)
     .gt("check_out", checkIn);
-  if (bookingError) return { room: null, considered: 0, reason: `Portal bookings: ${bookingError.message}` };
+  if (clashError) return { room: null, considered: 0, reason: `Portal bookings: ${clashError.message}`, order: [] };
 
-  const taken = new Set(
-    (bookings ?? [])
-      .filter((b) => b.is_active && b.status !== "cancelled" && !b.no_show)
-      .map((b) => b.property_id as string),
-  );
+  type HeldRow = { property_id: string; check_in: string; check_out: string; status: string; is_active: boolean; no_show: boolean };
+  const held = (rows: unknown): HeldRow[] =>
+    ((rows ?? []) as HeldRow[]).filter((b) => b.is_active && b.status !== "cancelled" && !b.no_show);
 
+  const taken = new Set(held(clashes).map((b) => b.property_id));
   const free = apartments.filter((a) => !taken.has(a.id as string));
   if (free.length === 0) {
     // Availability said this type was sellable, so being full here means the two
     // disagree. Better to say so than to hand a guest a flat somebody is in.
-    return { room: null, considered: apartments.length, reason: "Every apartment of this type is occupied for those dates" };
+    return {
+      room: null,
+      considered: apartments.length,
+      reason: "Every apartment of this type is occupied for those dates",
+      order: [],
+    };
   }
 
-  const { data: recent } = await portal
+  const windowStart = iso(addDays(new Date(`${iso(new Date())}T00:00:00Z`), -ROTATION_WINDOW_DAYS));
+  const today = iso(new Date());
+  const { data: history } = await portal
     .from("bookings")
-    .select("property_id, check_out")
-    .in("property_id", free.map((a) => a.id))
-    .order("check_out", { ascending: false });
+    .select("property_id, check_in, check_out, status, is_active, no_show")
+    .in("property_id", ids)
+    .gte("check_out", windowStart)
+    .lte("check_in", today);
 
-  const lastUsed = new Map<string, string>();
-  for (const r of recent ?? []) {
-    const id = r.property_id as string;
-    if (!lastUsed.has(id)) lastUsed.set(id, r.check_out as string);
+  const nights = new Map<string, number>();
+  const lastOut = new Map<string, string>();
+  for (const b of held(history)) {
+    const id = b.property_id;
+    for (let d = new Date(`${b.check_in}T00:00:00Z`); iso(d) < (b.check_out as string); d = addDays(d, 1)) {
+      const key = iso(d);
+      if (key < windowStart || key > today) continue;
+      nights.set(id, (nights.get(id) ?? 0) + 1);
+    }
+    const out = b.check_out;
+    if (!lastOut.has(id) || out > (lastOut.get(id) as string)) lastOut.set(id, out);
   }
-  free.sort((a, b) => (lastUsed.get(a.id as string) ?? "").localeCompare(lastUsed.get(b.id as string) ?? ""));
 
-  return { room: free[0].room_number as string, considered: apartments.length, reason: null };
+  free.sort((a, b) => {
+    const ida = a.id as string, idb = b.id as string;
+    const byNights = (nights.get(ida) ?? 0) - (nights.get(idb) ?? 0);
+    if (byNights !== 0) return byNights;
+    // Level on nights, so give it to whichever has been standing empty longest.
+    return (lastOut.get(ida) ?? "").localeCompare(lastOut.get(idb) ?? "");
+  });
+
+  return {
+    room: free[0].room_number as string,
+    considered: apartments.length,
+    reason: null,
+    order: free.map((a) => `${a.room_number}:${nights.get(a.id as string) ?? 0}n`),
+  };
 }
