@@ -35,7 +35,19 @@ const RESTRICTION_FIELDS = [
   "stop_sell",
 ] as const;
 
-export async function flushAll(limitPerProperty = 5000): Promise<FlushReport[]> {
+/**
+ * PostgREST truncates any response at 1000 rows. `claim_outbox` stamps
+ * claimed_at on every row it updates, so asking for more than 1000 marks rows
+ * as claimed that are then never returned to the caller and never sent. They
+ * only come back after the five minute claim expiry, having burned an attempt
+ * each time, and are abandoned for good once attempts reaches eight. On a burst
+ * larger than 1000, such as a new room type arriving with 500 days of grid,
+ * that silently strands availability, which is how a night stays open after it
+ * has been sold. Never claim more than PostgREST will hand back.
+ */
+const CLAIM_LIMIT = 1000;
+
+export async function flushAll(limitPerProperty = CLAIM_LIMIT): Promise<FlushReport[]> {
   const supabase = db();
   const { data, error } = await supabase.rpc("properties_with_pending");
   if (error) throw new Error(error.message);
@@ -47,7 +59,7 @@ export async function flushAll(limitPerProperty = 5000): Promise<FlushReport[]> 
   return reports;
 }
 
-export async function flushProperty(propertyId: string, limit = 5000): Promise<FlushReport> {
+export async function flushProperty(propertyId: string, limit = CLAIM_LIMIT): Promise<FlushReport> {
   const supabase = db();
 
   const { data: property } = await supabase.from("properties").select("*").eq("id", propertyId).single();
@@ -85,7 +97,7 @@ export async function flushProperty(propertyId: string, limit = 5000): Promise<F
 
   const { data: claimed, error: claimError } = await supabase.rpc("claim_outbox", {
     p_property: propertyId,
-    p_limit: limit,
+    p_limit: Math.min(limit, CLAIM_LIMIT),
   });
   if (claimError) throw new Error(claimError.message);
 

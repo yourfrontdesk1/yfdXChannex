@@ -12,7 +12,9 @@ create index if not exists outbox_claim_idx
 -- Claim a slice of a property's pending deltas. Skip locked means two workers
 -- never fight over the same row, and a row claimed but not sent is released by
 -- the reclaim window below rather than being lost.
-create or replace function claim_outbox(p_property uuid, p_limit int default 5000)
+-- Capped at 1000 because PostgREST truncates a response there, and a row this
+-- updates but does not return is a row that stays claimed and unsent.
+create or replace function claim_outbox(p_property uuid, p_limit int default 1000)
 returns setof outbox as $$
   update outbox o
      set claimed_at = now(),
@@ -24,7 +26,7 @@ returns setof outbox as $$
         and (claimed_at is null or claimed_at < now() - interval '5 minutes')
         and attempts < 8
       order by enqueued_at
-      limit p_limit
+      limit least(p_limit, 1000)
       for update skip locked
    )
   returning o.*;
