@@ -415,13 +415,17 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
 
     for (const p of priced) {
       considered++;
-      sum += p.price;
       if (p.price === Math.round(p.floor)) atFloor++;
       if (p.price === Math.round(p.ceiling)) atCeiling++;
 
-      if (p.was !== undefined && p.was !== null && Math.round(p.was) === p.price) { unchanged++; continue; }
-
+      // What is stored and sent is the published price, so that is what the
+      // comparison has to be against. Comparing the net against it means every
+      // night looks unchanged and the uplift never leaves.
       const published = await publishedPrice(p.price, occupancyOf.get(p.planId) ?? 2, commissionPct, taxPerPerson);
+      sum += published;
+
+      if (p.was !== undefined && p.was !== null && Math.round(p.was) === published) { unchanged++; continue; }
+
       rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: p.rtId, rate_plan_id: p.planId, date, rate: published });
       (p.log.factors as Record<string, unknown>).net = p.price;
       (p.log.factors as Record<string, unknown>).commission_pct = commissionPct;
