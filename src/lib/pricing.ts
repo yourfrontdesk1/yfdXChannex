@@ -54,6 +54,26 @@ export type PricingResult = {
  */
 const LADDER = ["Standard Studio", "Studio Apartment", "Executive Studio"] as const;
 
+/**
+ * What the engine decides is what Victory Suites keeps. What Booking.com shows a
+ * guest has to carry two more things on top.
+ *
+ * Commission is taken OFF the gross, so recovering it is a division and not a
+ * multiplication. Adding fifteen percent to £100 gives £115, and fifteen percent
+ * of £115 is £17.25, so £97.75 comes back and the fifteen was never recovered.
+ * £100 / 0.85 is £117.65, and that does come back as £100.
+ *
+ * Tourist tax is per person per night, so it is added after the commission
+ * rather than before it: it is a pass through, not revenue to be marked up. The
+ * head count used is what the rate plan is quoted for, because a per room price
+ * cannot know how many people will actually turn up.
+ */
+async function publishedPrice(net: number, occupancy: number, commissionPct: number, taxPerPerson: number): Promise<number> {
+  const rate = Math.max(0, Math.min(90, commissionPct)) / 100;
+  const grossed = rate > 0 ? net / (1 - rate) : net;
+  return Math.round(grossed + taxPerPerson * Math.max(1, occupancy));
+}
+
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const addDays = (d: Date, n: number) => new Date(d.getTime() + n * 86400000);
 
@@ -167,7 +187,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
   // code, so pricing them would move nothing and only add noise to the outbox.
   const { data: plans, error: planError } = await hub
     .from("rate_plans")
-    .select("id, name, room_type_id, ota_rate_plan_code")
+    .select("id, name, room_type_id, ota_rate_plan_code, occupancy")
     .in("room_type_id", (roomTypes ?? []).map((r) => r.id));
   if (planError) throw new Error(`Rate plans: ${planError.message}`);
   const sellingPlanOf = new Map(
@@ -276,6 +296,16 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
   const nights = Array.from({ length: lastOffset - firstOffset + 1 }, (_, i) => iso(addDays(today, firstOffset + i)));
 
   const totalUnits = (roomTypes ?? []).reduce((sum, r) => sum + Number(r.count_of_rooms ?? 0), 0);
+
+  const { data: cfg } = await hub.from("hub_config").select("key, value");
+  const setting = (k: string, fallback: number) => {
+    const v = (cfg ?? []).find((c) => c.key === k)?.value;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const commissionPct = setting("channel_commission_pct", 0);
+  const taxPerPerson = setting("tourist_tax_per_person", 0);
+  const occupancyOf = new Map<string, number>((plans ?? []).map((p) => [p.id as string, Number(p.occupancy ?? 2)]));
 
   const rows: { property_id: string; room_type_id: string; rate_plan_id: string; date: string; rate: number }[] = [];
   const logs: Record<string, unknown>[] = [];
@@ -391,10 +421,17 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
 
       if (p.was !== undefined && p.was !== null && Math.round(p.was) === p.price) { unchanged++; continue; }
 
-      rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: p.rtId, rate_plan_id: p.planId, date, rate: p.price });
+      const published = await publishedPrice(p.price, occupancyOf.get(p.planId) ?? 2, commissionPct, taxPerPerson);
+      rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: p.rtId, rate_plan_id: p.planId, date, rate: published });
+      (p.log.factors as Record<string, unknown>).net = p.price;
+      (p.log.factors as Record<string, unknown>).commission_pct = commissionPct;
+      (p.log.factors as Record<string, unknown>).tourist_tax = taxPerPerson * (occupancyOf.get(p.planId) ?? 2);
 
       for (const derivedId of derivedPlansOf.get(p.rtId) ?? []) {
-        const derived = Math.round(Math.max(p.floor, p.price * NON_REFUNDABLE_DISCOUNT));
+        // The discount comes off what we keep, not off the tax and the
+        // commission, so it is worked out net and grossed up the same way.
+        const derivedNet = Math.round(Math.max(p.floor, p.price * NON_REFUNDABLE_DISCOUNT));
+        const derived = await publishedPrice(derivedNet, occupancyOf.get(derivedId) ?? 2, commissionPct, taxPerPerson);
         const derivedWas = currentPrice.get(`${derivedId}|${date}`);
         if (derivedWas !== undefined && derivedWas !== null && Math.round(derivedWas) === derived) continue;
         rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: p.rtId, rate_plan_id: derivedId, date, rate: derived });
