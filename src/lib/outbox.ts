@@ -207,16 +207,30 @@ async function loadRatePlans(propertyId: string): Promise<Map<string, RatePlan>>
 
 async function loadAri(propertyId: string, rows: OutboxRow[]): Promise<Map<string, AriRow>> {
   const dates = [...new Set(rows.map((r) => r.date))].sort();
-  const { data } = await db()
-    .from("ari")
-    .select("*")
-    .eq("property_id", propertyId)
-    .gte("date", dates[0])
-    .lte("date", dates[dates.length - 1]);
 
+  // PostgREST caps a select at 1000 rows and this range is wide: five room
+  // types over 500 days, each with an availability row and one row per rate
+  // plan, is several thousand. An unpaged read returns the earliest 1000, every
+  // outbox row beyond them finds no value, and they are deferred for ever in a
+  // loop that never sends and never errors. Third time this cap has bitten in
+  // this codebase, so it is paged like everywhere else.
   const map = new Map<string, AriRow>();
-  for (const row of (data ?? []) as AriRow[]) {
-    map.set([row.room_type_id, row.rate_plan_id ?? "-", row.date].join("|"), row);
+  const PAGE = 1000;
+  for (let offset = 0; ; offset += PAGE) {
+    const { data, error } = await db()
+      .from("ari")
+      .select("*")
+      .eq("property_id", propertyId)
+      .gte("date", dates[0])
+      .lte("date", dates[dates.length - 1])
+      .order("date", { ascending: true })
+      .order("room_type_id", { ascending: true })
+      .range(offset, offset + PAGE - 1);
+    if (error) throw new Error(`Reading ari: ${error.message}`);
+    for (const row of (data ?? []) as AriRow[]) {
+      map.set([row.room_type_id, row.rate_plan_id ?? "-", row.date].join("|"), row);
+    }
+    if (!data || data.length < PAGE) break;
   }
   return map;
 }
