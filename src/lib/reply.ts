@@ -66,6 +66,54 @@ export type ReplyResult = {
   escalated: number; rate_limited: number; failed: number; errors: string[];
 };
 
+/**
+ * Asks YourFrontDesk what to say.
+ *
+ * Returns null rather than throwing when it cannot be reached, so the caller can
+ * fall back. A guest waiting on an answer is not helped by this service being
+ * principled about whose job it was.
+ */
+async function askDownstream(
+  booking: { ota_reservation_code?: string | null; guest_name?: string | null },
+  text: string,
+): Promise<string | null> {
+  const base = process.env.DOWNSTREAM_REPLY_URL;
+  const secret = process.env.DOWNSTREAM_SECRET;
+  const ref = booking.ota_reservation_code;
+  if (!base || !secret || !ref) return null;
+  try {
+    const res = await fetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-channex-webhook-secret": secret },
+      body: JSON.stringify({ external_ref: ref, message: text, guest_name: booking.guest_name ?? null }),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { reply?: string; escalate?: boolean };
+    // An escalation is an answer: it means leave it for a person. Saying so
+    // rather than returning null stops the fallback quietly overriding it.
+    if (body.escalate) return "ESCALATE";
+    return body.reply?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function askHere(context: string, text: string, key: string): Promise<string | null> {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 400,
+      system: `${RULES}\n\n=== THIS GUEST ===\n${context}`,
+      messages: [{ role: "user", content: text }],
+    }),
+  });
+  if (!res.ok) return null;
+  const payload = await res.json();
+  return (payload?.content?.[0]?.text as string | undefined) ?? null;
+}
+
 export async function answerPendingMessages(): Promise<ReplyResult> {
   const supabase = db();
   const result: ReplyResult = { considered: 0, answered: 0, skipped_no_booking: 0, escalated: 0, rate_limited: 0, failed: 0, errors: [] };
@@ -128,7 +176,7 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
 
     const { data: booking } = await supabase
       .from("inbound_bookings")
-      .select("guest_name, arrival_date, departure_date, portal_url, status")
+      .select("guest_name, arrival_date, departure_date, portal_url, status, ota_reservation_code")
       .eq("channex_booking_id", message.channex_booking_id as string)
       .maybeSingle();
 
@@ -142,21 +190,15 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
     const context = `This guest is ${booking.guest_name ?? "a guest"}. They arrive ${booking.arrival_date} and leave ${booking.departure_date}. Their guest portal link, the only link you may ever send them, is ${booking.portal_url}. Everything about their stay, payment, check in, door code and WiFi, appears there.`;
 
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({
-          model: MODEL,
-          max_tokens: 400,
-          system: `${RULES}\n\n=== THIS GUEST ===\n${context}`,
-          messages: [{ role: "user", content: text }],
-        }),
-      });
-      const payload = await res.json();
-      const answer: string | undefined = payload?.content?.[0]?.text;
-      if (!res.ok || !answer) {
+      // YourFrontDesk answers, because that is where the reservation lives and
+      // where the knowledge about the guest's actual apartment is kept: its own
+      // door code rules, its WiFi, the pool pass, the bin store. This service
+      // keeps a brain of its own only as a fallback, for the case where the
+      // downstream is unreachable and silence would be worse than a general answer.
+      const answer = await askDownstream(booking, text) ?? await askHere(context, text, key);
+      if (!answer) {
         result.failed++;
-        result.errors.push(payload?.error?.message ?? `Claude answered ${res.status}`);
+        result.errors.push("Neither YourFrontDesk nor the fallback produced an answer");
         continue;
       }
 
