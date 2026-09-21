@@ -30,7 +30,7 @@ export type BookingRevision = {
   departure_date: string;
   amount?: string;
   currency?: string;
-  customer?: { name?: string; surname?: string };
+  customer?: { name?: string; surname?: string; mail?: string; phone?: string };
   rooms?: BookingRoom[];
 };
 
@@ -222,6 +222,30 @@ function effectOf(revision: BookingRevision, byChannexId: Map<string, RoomType>)
   return effect;
 }
 
+const OTA_PREFIX: Record<string, string> = {
+  bookingcom: "BDC",
+  "booking.com": "BDC",
+  hotelbeds: "HBD",
+  expedia: "EXP",
+  airbnb: "ABB",
+  agoda: "AGD",
+};
+
+/**
+ * The reference the rest of the estate already uses.
+ *
+ * Bookings for these apartments arrive from more than one feed, referenced as
+ * BDC-6639721282 or HBD-1114132-... Channex hands over the bare number. Send it
+ * bare and the same guest appears twice under two references, with two payment
+ * links. Matching the convention means whichever feed arrives second updates the
+ * booking rather than creating a rival to it.
+ */
+function externalRefFor(revision: BookingRevision, revisionId: string): string {
+  const raw = revision.ota_reservation_code ?? revision.unique_id ?? revision.booking_id ?? revisionId;
+  const prefix = OTA_PREFIX[String(revision.ota_name ?? "").toLowerCase().replace(/\s+/g, "")];
+  return prefix && !String(raw).includes("-") ? `${prefix}-${raw}` : String(raw);
+}
+
 /**
  * Downstream keeps the booking. This service only ever owns availability, so the
  * revision is handed on exactly as Channex sent it.
@@ -237,6 +261,14 @@ async function forwardDownstream(property: Property, revision: BookingRevision):
   // is translated into the shape that API already speaks.
   if (property.downstream_url.includes("/api/external/bookings")) {
     return forwardToGuestPortal(property, revision);
+  }
+
+  // YourFrontDesk owns the guest for this portfolio: it creates the portal
+  // booking, keeps the link and decides what the guest is told. So it gets a
+  // reservation in plain terms rather than a Channex revision, and no Channex
+  // shape leaks into a system that should not have to know what Channex is.
+  if (property.downstream_url.includes("channex-webhook")) {
+    return forwardToYourFrontDesk(property, revision);
   }
 
   try {
@@ -279,6 +311,104 @@ async function forwardDownstream(property: Property, revision: BookingRevision):
 
 
 /**
+ * Hands a reservation to YourFrontDesk in its own words.
+ *
+ * Everything Channex specific is resolved here: the uuid of a room type becomes
+ * its name, and the bare OTA reference gains the prefix the rest of the estate
+ * already uses, so whichever feed arrives second updates a booking instead of
+ * creating a rival to it.
+ */
+async function forwardToYourFrontDesk(property: Property, revision: BookingRevision): Promise<boolean> {
+  const supabase = db();
+  const revisionId = revision.id ?? revision.revision_id;
+
+  const { data: row } = await supabase
+    .from("properties")
+    .select("downstream_secret")
+    .eq("id", property.id)
+    .single();
+  const secret = row?.downstream_secret as string | null;
+  if (!secret) {
+    await supabase
+      .from("inbound_bookings")
+      .update({ forward_error: "No downstream secret is set for this property" })
+      .eq("revision_id", revisionId);
+    return false;
+  }
+
+  const status = String(revision.status).toLowerCase();
+  const event = status === "cancelled" ? "booking.cancelled" : status === "modified" ? "booking.modified" : "booking.new";
+
+  const room = revision.rooms?.[0];
+  let roomType: string | null = null;
+  if (room?.room_type_id) {
+    const { data: rt } = await supabase
+      .from("room_types")
+      .select("name")
+      .eq("channex_room_type_id", room.room_type_id)
+      .maybeSingle();
+    roomType = (rt?.name as string | null) ?? null;
+  }
+
+  const body = {
+    event,
+    external_ref: externalRefFor(revision, revisionId),
+    revision_id: revisionId,
+    guest: {
+      first_name: revision.customer?.name ?? "Guest",
+      last_name: revision.customer?.surname ?? (revision.ota_name ?? "Booking"),
+      email: revision.customer?.mail ?? "",
+      phone: revision.customer?.phone ?? "",
+    },
+    check_in: revision.arrival_date,
+    check_out: revision.departure_date,
+    room_type: roomType,
+    source: revision.ota_name ?? "Booking.com",
+    amount: revision.amount ? Number(revision.amount) : null,
+    currency: revision.currency ?? "GBP",
+  };
+
+  try {
+    const res = await fetch(property.downstream_url as string, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-channex-webhook-secret": secret },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+
+    if (!res.ok) {
+      await supabase
+        .from("inbound_bookings")
+        .update({ forward_error: `${res.status} ${text.slice(0, 500)}` })
+        .eq("revision_id", revisionId);
+      return false;
+    }
+
+    let payload: { portal_url?: string | null; status?: string; detail?: string | null } = {};
+    try { payload = JSON.parse(text); } catch {}
+
+    await supabase
+      .from("inbound_bookings")
+      .update({
+        forwarded_at: new Date().toISOString(),
+        // A reservation that landed but was not filed, or was not messaged, is
+        // not an error to retry. It is a note worth keeping where a person will
+        // see it.
+        forward_error: payload.detail ?? null,
+        portal_url: payload.portal_url ?? null,
+      })
+      .eq("revision_id", revisionId);
+    return true;
+  } catch (e) {
+    await supabase
+      .from("inbound_bookings")
+      .update({ forward_error: e instanceof Error ? e.message : String(e) })
+      .eq("revision_id", revisionId);
+    return false;
+  }
+}
+
+/**
  * Hands a booking to the Victory Suites guest portal, which creates the guest,
  * the booking and the payment link and gives back the guest's own portal URL.
  *
@@ -295,22 +425,7 @@ async function forwardToGuestPortal(property: Property, revision: BookingRevisio
 
   const cancelled = String(revision.status).toLowerCase() === "cancelled";
 
-  // The portal already holds Parkside bookings from the old feed, referenced as
-  // BDC-6639721282 and HBD-1114132-... Channex hands us the bare number. Send it
-  // bare and the same guest arrives twice under two references, with two
-  // payment links. Matching the convention means whichever feed arrives second
-  // updates the booking instead of creating a rival.
-  const OTA_PREFIX: Record<string, string> = {
-    bookingcom: "BDC",
-    "booking.com": "BDC",
-    hotelbeds: "HBD",
-    expedia: "EXP",
-    airbnb: "ABB",
-    agoda: "AGD",
-  };
-  const rawRef = revision.ota_reservation_code ?? revision.unique_id ?? revision.booking_id ?? revisionId;
-  const prefix = OTA_PREFIX[String(revision.ota_name ?? "").toLowerCase().replace(/\s+/g, "")];
-  const externalRef = prefix && !String(rawRef).includes("-") ? `${prefix}-${rawRef}` : rawRef;
+  const externalRef = externalRefFor(revision, revisionId);
   const room = revision.rooms?.[0];
 
   // Channex names a room type by uuid. The portal shows this to staff, so it
