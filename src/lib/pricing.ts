@@ -74,6 +74,21 @@ async function publishedPrice(net: number, occupancy: number, commissionPct: num
   return Math.round(grossed + taxPerPerson * Math.max(1, occupancy));
 }
 
+/**
+ * The same journey backwards.
+ *
+ * Everything the engine reasons about is net, but what is stored and read back
+ * is the published price. Comparing one against the other anchors the damping to
+ * a number a fifth too high, and because the damping then only lets the price
+ * move a little each run, it climbs instead of settling. That is exactly what
+ * happened the first time this went in.
+ */
+function netOf(published: number, occupancy: number, commissionPct: number, taxPerPerson: number): number {
+  const rate = Math.max(0, Math.min(90, commissionPct)) / 100;
+  const withoutTax = published - taxPerPerson * Math.max(1, occupancy);
+  return Math.max(0, rate > 0 ? withoutTax * (1 - rate) : withoutTax);
+}
+
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const addDays = (d: Date, n: number) => new Date(d.getTime() + n * 86400000);
 
@@ -377,7 +392,12 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
       // Nothing lurches. A night walks toward what it is worth a few percent at
       // a time, so a listing never jumps in front of a guest who is watching it
       // and Booking.com never sees a price spasm.
-      const was = currentPrice.get(`${planId}|${date}`);
+      // Read back as net, because that is what the rest of this reasons in.
+      const storedGross = currentPrice.get(`${planId}|${date}`);
+      const was =
+        storedGross === undefined || storedGross === null
+          ? storedGross
+          : netOf(Number(storedGross), Number(occupancyOf.get(planId) ?? 2), commissionPct, taxPerPerson);
       const step = Number(rule.max_step_pct ?? 5) / 100;
       let price = target;
       if (was !== undefined && was !== null && was > 0) {
@@ -437,7 +457,8 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
       const published = await publishedPrice(p.price, occupancyOf.get(p.planId) ?? 2, commissionPct, taxPerPerson);
       sum += published;
 
-      if (p.was !== undefined && p.was !== null && Math.round(p.was) === published) { unchanged++; continue; }
+      const storedNow = currentPrice.get(`${p.planId}|${date}`);
+      if (storedNow !== undefined && storedNow !== null && Math.round(Number(storedNow)) === published) { unchanged++; continue; }
 
       rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: p.rtId, rate_plan_id: p.planId, date, rate: published });
       (p.log.factors as Record<string, unknown>).net = p.price;
