@@ -93,7 +93,14 @@ export function welcomeMessage(booking: {
   return lines.join("\n");
 }
 
-async function threadFor(channexPropertyId: string, bookingId: string | null, otaRef: string | null): Promise<string | null> {
+/**
+ * Finds the OTA's own message thread for a booking.
+ *
+ * Exported because YourFrontDesk decides what a guest is told but cannot reach
+ * the thread: only this service holds the Channex key. It sends the words and a
+ * booking reference, and the thread is resolved here.
+ */
+export async function threadFor(channexPropertyId: string, bookingId: string | null, otaRef: string | null): Promise<string | null> {
   const res = await channexRequest<{ data?: { id?: string; attributes?: ThreadAttributes }[] }>(
     "GET",
     `/message_threads?filter[property_id]=${channexPropertyId}`,
