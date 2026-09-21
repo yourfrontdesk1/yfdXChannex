@@ -13,6 +13,11 @@ import type { Property, RoomType } from "./types";
 export type BookingRoom = {
   room_type_id: string | null;
   rate_plan_id: string | null;
+  occupancy?: { adults?: number; children?: number; infants?: number };
+  /** Per night breakdown, each night dated. The portal stores it as nightly_rates. */
+  days?: Record<string, string | number> | null;
+  taxes?: unknown;
+  services?: unknown;
   checkin_date: string;
   checkout_date: string;
   amount?: string;
@@ -31,7 +36,18 @@ export type BookingRevision = {
   departure_date: string;
   amount?: string;
   currency?: string;
-  customer?: { name?: string; surname?: string; mail?: string; phone?: string };
+  customer?: {
+    name?: string; surname?: string; mail?: string; phone?: string;
+    address?: string; city?: string; zip?: string; country?: string; language?: string;
+  };
+  occupancy?: { adults?: number; children?: number; infants?: number };
+  notes?: string | null;
+  arrival_hour?: string | null;
+  inserted_at?: string;
+  ota_commission?: string | number | null;
+  payment_collect?: string | null;
+  payment_type?: string | null;
+  services?: unknown;
   rooms?: BookingRoom[];
 };
 
@@ -365,27 +381,75 @@ async function forwardToYourFrontDesk(property: Property, revision: BookingRevis
     roomNote = pick.reason ?? (pick.order.length ? `rotation: ${pick.order.join(", ")}` : null);
   }
 
+  // Everything Channex sends that the portal can hold. Anything dropped here is
+  // gone for good: the revision is offered once, and a guest count, an arrival
+  // time or a meal plan note that never arrives is one somebody has to chase by
+  // hand later.
+  const occ = room?.occupancy ?? revision.occupancy ?? {};
+  const adults = occ.adults ?? null;
+  const children = occ.children ?? null;
+  const infants = occ.infants ?? null;
+  const guestCount = [adults, children, infants].reduce<number>((n, v) => n + (v ?? 0), 0) || null;
+
+  // The arrival hour belongs with the requests, because that is where anyone
+  // reading the booking will look for it.
+  const requests = [
+    revision.arrival_hour ? `Arriving around ${revision.arrival_hour}` : null,
+    revision.notes ? String(revision.notes).trim() : null,
+  ].filter(Boolean).join("\n") || null;
+
+  let ratePlanName: string | null = null;
+  if (room?.rate_plan_id) {
+    const { data: rp } = await supabase
+      .from("rate_plans")
+      .select("name")
+      .eq("channex_rate_plan_id", room.rate_plan_id)
+      .maybeSingle();
+    ratePlanName = (rp?.name as string | null) ?? null;
+  }
+
   const body = {
     event,
     external_ref: externalRefFor(revision, revisionId),
     room: apartment,
     revision_id: revisionId,
+    echo_token: revisionId,
     guest: {
       first_name: revision.customer?.name ?? "Guest",
       last_name: revision.customer?.surname ?? (revision.ota_name ?? "Booking"),
       email: revision.customer?.mail ?? "",
       phone: revision.customer?.phone ?? "",
     },
+    street: revision.customer?.address ?? null,
+    city: revision.customer?.city ?? null,
+    postcode: revision.customer?.zip ?? null,
+    country: revision.customer?.country ?? null,
+    language: revision.customer?.language ?? null,
     check_in: revision.arrival_date,
     check_out: revision.departure_date,
     room_type: roomType,
+    // Plain English, because staff read this one.
+    room_name: roomType,
     // The id, not just the name. YourFrontDesk files the booking against the
     // listing carrying this id, so a room renamed in an extranet cannot quietly
     // send a guest to the wrong listing, and the wrong listing is the wrong owner.
     room_type_id: room?.room_type_id ?? null,
+    rate_plan: ratePlanName,
     source: revision.ota_name ?? "Booking.com",
+    sending_system: "channex",
+    ota_status: revision.status ?? null,
     amount: revision.amount ? Number(revision.amount) : null,
+    amount_after_tax: revision.amount ? Number(revision.amount) : null,
     currency: revision.currency ?? "GBP",
+    adults,
+    children,
+    infants,
+    num_guests: guestCount,
+    units_booked: revision.rooms?.length ?? 1,
+    special_requests: requests,
+    nightly_rates: room?.days ?? null,
+    extras: revision.services ?? null,
+    created_at: revision.inserted_at ?? null,
   };
 
   try {
