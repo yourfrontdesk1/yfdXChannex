@@ -15,15 +15,29 @@ import { db } from "./db";
 export const PARKSIDE_PROPERTY_ID = "3d9abd18-4ce4-4703-9cdd-7c879db8637f";
 export const SYNC_DAYS = 500;
 
-export const PARKSIDE_ROOMS = ["3.17A", "4.17A", "8.17A", "1.11", "2.05", "7.08", "7.18", "9.17B", "1.14", "3.17B", "4.17B", "2.17"];
-
-/** Our room type name, against the type the portal records on an apartment. */
-const PORTAL_TYPE_OF: Record<string, string> = {
-  "Studio Apartment": "studio",
-  "Executive Studio": "executive_studio",
-  "One Bedroom Apartment": "one_bed",
-  "Two Bedroom Apartment": "two_bed",
+/**
+ * Which apartments sell as which room type, declared by room number.
+ *
+ * This used to read the portal's own `type` column, which held while every room
+ * type mapped onto exactly one portal type. It no longer does. 1.02 and 6.02
+ * have no balcony and sell as their own Booking.com room, yet the portal records
+ * them as `studio`, identical to 3.17A. Nothing in the portal can tell them
+ * apart, so membership is declared here rather than derived, and the portal is
+ * left untouched.
+ */
+export const ROOMS_BY_TYPE: Record<string, string[]> = {
+  "Studio Apartment": ["3.17A", "4.17A", "8.17A"],
+  "Standard Studio": ["1.02", "6.02"],
+  "Executive Studio": ["1.11", "2.05", "7.08", "7.18", "9.17B"],
+  "One Bedroom Apartment": ["1.14", "3.17B", "4.17B"],
+  "Two Bedroom Apartment": ["2.17"],
 };
+
+export const PARKSIDE_ROOMS = Object.values(ROOMS_BY_TYPE).flat();
+
+const TYPE_OF_ROOM: Record<string, string> = Object.fromEntries(
+  Object.entries(ROOMS_BY_TYPE).flatMap(([type, rooms]) => rooms.map((room) => [room, type])),
+);
 
 export type AvailabilitySyncResult = {
   apartments: number;
@@ -67,9 +81,12 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
     throw new Error(`Expected ${PARKSIDE_ROOMS.length} Parkside apartments, the portal returned ${apartments?.length ?? 0}`);
   }
 
-  const typeOfApartment = new Map(apartments.map((a) => [a.id as string, a.type as string]));
+  const typeOfApartment = new Map(apartments.map((a) => [a.id as string, TYPE_OF_ROOM[a.room_number as string]]));
   const unitsOfType: Record<string, number> = {};
-  for (const a of apartments) unitsOfType[a.type as string] = (unitsOfType[a.type as string] ?? 0) + 1;
+  for (const a of apartments) {
+    const type = TYPE_OF_ROOM[a.room_number as string];
+    unitsOfType[type] = (unitsOfType[type] ?? 0) + 1;
+  }
 
   const { data: bookings, error: bookingError } = await portal
     .from("bookings")
@@ -127,11 +144,12 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
   const rows: { property_id: string; room_type_id: string; rate_plan_id: null; date: string; availability: number }[] = [];
   let alreadyCorrect = 0;
   for (const rt of roomTypes ?? []) {
-    const portalType = PORTAL_TYPE_OF[rt.name as string];
-    if (!portalType) throw new Error(`No portal type is mapped for room type "${rt.name}"`);
-    const total = unitsOfType[portalType] ?? 0;
+    // A room type with no apartments declared would publish zero for every
+    // night, quietly shutting a room that is in fact for sale.
+    if (!ROOMS_BY_TYPE[rt.name as string]) throw new Error(`No apartments are declared for room type "${rt.name}"`);
+    const total = unitsOfType[rt.name as string] ?? 0;
     for (const date of dates) {
-      const sold = soldOn.get(date)?.[portalType] ?? 0;
+      const sold = soldOn.get(date)?.[rt.name as string] ?? 0;
       const availability = Math.max(0, total - sold);
       if (existing.get(`${rt.id}|${date}`) === availability) { alreadyCorrect++; continue; }
       rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: rt.id as string, rate_plan_id: null, date, availability });
