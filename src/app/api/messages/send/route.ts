@@ -44,7 +44,10 @@ export async function POST(request: Request) {
     const { data: booking } = await supabase
       .from("inbound_bookings")
       .select("channex_booking_id, ota_reservation_code, property_id")
-      .eq("ota_reservation_code", externalRef)
+      // YourFrontDesk knows the booking as BDC-6639721282, this service stores
+      // the bare number Channex sent. Match either, or a message never finds
+      // its thread and the guest is answered by nobody.
+      .or(`ota_reservation_code.eq.${externalRef},ota_reservation_code.eq.${externalRef.replace(/^[A-Z]{3}-/, "")}`)
       .order("received_at", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -83,7 +86,7 @@ export async function POST(request: Request) {
     await db()
       .from("inbound_bookings")
       .update({ link_sent_at: new Date().toISOString() })
-      .eq("ota_reservation_code", externalRef);
+      .or(`ota_reservation_code.eq.${externalRef},ota_reservation_code.eq.${externalRef.replace(/^[A-Z]{3}-/, "")}`);
   }
 
   return NextResponse.json({ ok: true, thread_id: threadId });

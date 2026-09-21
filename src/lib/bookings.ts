@@ -374,8 +374,23 @@ async function forwardToYourFrontDesk(property: Property, revision: BookingRevis
   let apartment: string | null = null;
   let roomNote: string | null = null;
   if (event !== "booking.cancelled" && roomType) {
-    const pick = await pickFreeApartment(roomType, revision.arrival_date, revision.departure_date);
+    // A booking that has already been given a flat keeps it. Choosing again on a
+    // retry or an amendment hands the guest a second apartment and leaves the
+    // first one held against nobody.
+    const { data: already } = await supabase
+      .from("inbound_bookings")
+      .select("apartment")
+      .eq("revision_id", revisionId)
+      .maybeSingle();
+    apartment = (already?.apartment as string | null) ?? null;
+
+    const pick = apartment
+      ? { room: apartment, reason: null as string | null, order: [] as string[] }
+      : await pickFreeApartment(roomType, revision.arrival_date, revision.departure_date);
     apartment = pick.room;
+    if (apartment && !already?.apartment) {
+      await supabase.from("inbound_bookings").update({ apartment }).eq("revision_id", revisionId);
+    }
     // The order is kept even on success, so a question about why a guest got a
     // particular flat can be answered rather than guessed at.
     roomNote = pick.reason ?? (pick.order.length ? `rotation: ${pick.order.join(", ")}` : null);
