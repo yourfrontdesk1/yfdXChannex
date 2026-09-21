@@ -39,7 +39,15 @@ export async function runJob<T>(job: string, work: () => Promise<T>): Promise<T>
   }
 }
 
-export type JobHealth = { job: string; last_ok: string | null; last_run: string | null; last_error: string | null; stale: boolean };
+export type JobHealth = {
+  job: string;
+  last_ok: string | null;
+  last_run: string | null;
+  last_error: string | null;
+  stale: boolean;
+  /** Switched off on purpose in hub_config, so its silence is expected. */
+  disabled?: boolean;
+};
 
 /** How long each job may go quiet before silence itself is the problem. */
 const EXPECTED_GAP_MINUTES: Record<string, number> = {
@@ -90,6 +98,13 @@ async function unexplainedClosures(): Promise<number> {
   return total + (maxStay ?? 0);
 }
 
+/** Which kill switch in hub_config governs which scheduled job. */
+const SWITCHED_BY: Record<string, string> = {
+  auto_link_enabled: "send-links",
+  auto_reply_enabled: "answer-messages",
+  pricing_enabled: "pricing-near",
+};
+
 export async function health(): Promise<{ healthy: boolean; jobs: JobHealth[]; closures: number }> {
   const supabase = db();
   const jobs: JobHealth[] = [];
@@ -114,6 +129,24 @@ export async function health(): Promise<{ healthy: boolean; jobs: JobHealth[]; c
       last_error: runs?.[0]?.ok === false ? (lastError ?? null) : null,
       stale: minutesSince > gap,
     });
+  }
+
+  // A job that has been deliberately switched off is not a job that has failed.
+  // Leaving it to go stale turns the whole board red and teaches everyone to
+  // ignore it, which is worse than having no board at all.
+  const supabase2 = db();
+  const { data: config } = await supabase2.from("hub_config").select("key, value");
+  const off = new Set(
+    (config ?? [])
+      .filter((c) => String(c.value) === "false")
+      .map((c) => SWITCHED_BY[c.key as string])
+      .filter(Boolean) as string[],
+  );
+  for (const job of jobs) {
+    if (off.has(job.job)) {
+      job.stale = false;
+      job.disabled = true;
+    }
   }
 
   const closures = await unexplainedClosures();
