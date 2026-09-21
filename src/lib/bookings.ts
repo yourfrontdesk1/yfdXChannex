@@ -2,6 +2,7 @@ import { db } from "./db";
 import { channexRequest } from "./channex";
 import { addDays } from "./dates";
 import { applyEffectChange, holdKey, type Effect } from "./holds";
+import { pickFreeApartment } from "./parkside";
 import type { Property, RoomType } from "./types";
 
 /**
@@ -350,9 +351,22 @@ async function forwardToYourFrontDesk(property: Property, revision: BookingRevis
     roomType = (rt?.name as string | null) ?? null;
   }
 
+  // Somebody has to choose the flat. The portal will not: it resolves an
+  // apartment only when the caller names one, and its reply carries none at all.
+  // A booking sent without a room reaches the guest correctly and then belongs to
+  // no apartment anywhere, which is the failure nobody would notice.
+  let apartment: string | null = null;
+  let roomNote: string | null = null;
+  if (event !== "booking.cancelled" && roomType) {
+    const pick = await pickFreeApartment(roomType, revision.arrival_date, revision.departure_date);
+    apartment = pick.room;
+    roomNote = pick.reason;
+  }
+
   const body = {
     event,
     external_ref: externalRefFor(revision, revisionId),
+    room: apartment,
     revision_id: revisionId,
     guest: {
       first_name: revision.customer?.name ?? "Guest",
@@ -398,7 +412,7 @@ async function forwardToYourFrontDesk(property: Property, revision: BookingRevis
         // A reservation that landed but was not filed, or was not messaged, is
         // not an error to retry. It is a note worth keeping where a person will
         // see it.
-        forward_error: payload.detail ?? null,
+        forward_error: payload.detail ?? roomNote,
         portal_url: payload.portal_url ?? null,
       })
       .eq("revision_id", revisionId);

@@ -174,3 +174,74 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
     error: null,
   };
 }
+
+/**
+ * Picks the actual apartment a booking becomes.
+ *
+ * Channex sells a room type. The guest portal does NOT choose a flat: it only
+ * resolves one if the caller names it, and its reply carries no room at all. So
+ * if nobody picks, the booking reaches the portal, mints a link and messages the
+ * guest, then attaches to no apartment anywhere. That is the quietest possible
+ * failure and it was sitting in this path until it was caught.
+ *
+ * The choice is made here because this service already knows, night by night,
+ * which units of a type are free, and it reads that from the portal itself so it
+ * cannot disagree with the place the booking is going.
+ *
+ * Least recently occupied first, so stays spread across the flats instead of
+ * piling onto whichever one happens to sort first.
+ */
+export async function pickFreeApartment(
+  roomTypeName: string,
+  checkIn: string,
+  checkOut: string,
+): Promise<{ room: string | null; considered: number; reason: string | null }> {
+  const rooms = ROOMS_BY_TYPE[roomTypeName];
+  if (!rooms) return { room: null, considered: 0, reason: `No apartments are declared for "${roomTypeName}"` };
+
+  const portal = portalClient();
+  const { data: apartments, error: aptError } = await portal
+    .from("properties")
+    .select("id, room_number")
+    .in("room_number", rooms);
+  if (aptError) return { room: null, considered: 0, reason: `Portal apartments: ${aptError.message}` };
+  if (!apartments?.length) return { room: null, considered: 0, reason: "The portal returned none of these apartments" };
+
+  // A stay holds from check in up to, but not including, check out, so two
+  // bookings may share a date: one leaving, one arriving.
+  const { data: bookings, error: bookingError } = await portal
+    .from("bookings")
+    .select("property_id, check_in, check_out, status, is_active, no_show")
+    .in("property_id", apartments.map((a) => a.id))
+    .lt("check_in", checkOut)
+    .gt("check_out", checkIn);
+  if (bookingError) return { room: null, considered: 0, reason: `Portal bookings: ${bookingError.message}` };
+
+  const taken = new Set(
+    (bookings ?? [])
+      .filter((b) => b.is_active && b.status !== "cancelled" && !b.no_show)
+      .map((b) => b.property_id as string),
+  );
+
+  const free = apartments.filter((a) => !taken.has(a.id as string));
+  if (free.length === 0) {
+    // Availability said this type was sellable, so being full here means the two
+    // disagree. Better to say so than to hand a guest a flat somebody is in.
+    return { room: null, considered: apartments.length, reason: "Every apartment of this type is occupied for those dates" };
+  }
+
+  const { data: recent } = await portal
+    .from("bookings")
+    .select("property_id, check_out")
+    .in("property_id", free.map((a) => a.id))
+    .order("check_out", { ascending: false });
+
+  const lastUsed = new Map<string, string>();
+  for (const r of recent ?? []) {
+    const id = r.property_id as string;
+    if (!lastUsed.has(id)) lastUsed.set(id, r.check_out as string);
+  }
+  free.sort((a, b) => (lastUsed.get(a.id as string) ?? "").localeCompare(lastUsed.get(b.id as string) ?? ""));
+
+  return { room: free[0].room_number as string, considered: apartments.length, reason: null };
+}
