@@ -363,6 +363,10 @@ async function forwardToYourFrontDesk(property: Property, revision: BookingRevis
     check_in: revision.arrival_date,
     check_out: revision.departure_date,
     room_type: roomType,
+    // The id, not just the name. YourFrontDesk files the booking against the
+    // listing carrying this id, so a room renamed in an extranet cannot quietly
+    // send a guest to the wrong listing, and the wrong listing is the wrong owner.
+    room_type_id: room?.room_type_id ?? null,
     source: revision.ota_name ?? "Booking.com",
     amount: revision.amount ? Number(revision.amount) : null,
     currency: revision.currency ?? "GBP",
