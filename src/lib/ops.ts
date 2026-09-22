@@ -55,8 +55,10 @@ const EXPECTED_GAP_MINUTES: Record<string, number> = {
   // Runs every five minutes, so ninety would let eighteen runs go missing
   // before anyone heard about it. Four is enough to know something is wrong.
   "availability-sync": 20,
-  "pricing-near": 150,
-  "pricing-mid": 150,
+  // Every half hour now, so a hundred and fifty minutes would let five runs go
+  // missing before anyone heard.
+  "pricing-near": 75,
+  "pricing-mid": 75,
   "pricing-far": 1560,
   "bookings-poll": 60,
   "send-links": 30,

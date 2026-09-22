@@ -21,9 +21,12 @@ export type Horizon = "near" | "mid" | "far" | "all";
 
 /** How far ahead each pass reaches. A night in 2027 does not move every ten minutes. */
 const WINDOW: Record<Exclude<Horizon, "all">, [number, number]> = {
-  near: [0, 14],
-  mid: [15, 90],
-  far: [91, 499],
+  // Near reaches further than it did. A night three weeks out is still one
+  // somebody is looking at today, and the whole point of running often is that
+  // the nights being shopped get watched.
+  near: [0, 30],
+  mid: [31, 120],
+  far: [121, 499],
 };
 
 export type PricingResult = {
@@ -398,7 +401,13 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
         storedGross === undefined || storedGross === null
           ? storedGross
           : netOf(Number(storedGross), Number(occupancyOf.get(planId) ?? 2), commissionPct, taxPerPerson);
-      const step = Number(rule.max_step_pct ?? 5) / 100;
+      // The step is per run, and runs are now every half hour rather than once a
+      // day, so the same number means something completely different. Twelve
+      // percent forty eight times a day is not damping, it is a price nobody can
+      // follow. A few percent a run still crosses the whole range within a day
+      // when demand calls for it, and no single change is one a guest watching
+      // the page would notice.
+      const step = Number(rule.max_step_pct ?? 3) / 100;
       let price = target;
       if (was !== undefined && was !== null && was > 0) {
         const highest = Math.round(was * (1 + step));
