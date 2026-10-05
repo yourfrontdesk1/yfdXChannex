@@ -55,7 +55,7 @@ export type PricingResult = {
  * to sit below the rung beneath it. The one and two bedroom flats are left out:
  * they are different products with their own demand, not steps on this ladder.
  */
-const LADDER = ["Standard Studio", "Studio Apartment", "Executive Studio"] as const;
+const LADDER = ["Studio Apartment", "Executive Studio"] as const;
 
 /**
  * What the engine decides is what Victory Suites keeps. What Booking.com shows a

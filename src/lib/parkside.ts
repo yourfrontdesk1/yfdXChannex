@@ -27,7 +27,6 @@ export const SYNC_DAYS = 500;
  */
 export const ROOMS_BY_TYPE: Record<string, string[]> = {
   "Studio Apartment": ["3.17A", "4.17A", "8.17A"],
-  "Standard Studio": ["1.02", "6.02"],
   "Executive Studio": ["1.11", "2.05", "7.08", "7.18", "9.17B"],
   "One Bedroom Apartment": ["1.14", "3.17B", "4.17B"],
   "Two Bedroom Apartment": ["2.17"],
