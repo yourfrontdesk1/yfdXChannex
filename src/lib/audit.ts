@@ -10,7 +10,7 @@ import { channexRequest } from "./channex";
  *
  * Per active Booking.com channel:
  *  - the channel is switched on in Channex
- *  - the property has a booking webhook and a message webhook
+ *  - the property has a booking webhook and a message webhook, and the Messages app
  *  - Booking.com's own answer to the latest sync was success
  *  - Channex holds the same availability and price as the hub for 30 nights
  *  - no booking in the last 7 days failed to reach YourFrontDesk
@@ -47,6 +47,10 @@ export async function auditListings(): Promise<{ checks: AuditCheck[]; failed: n
     const hasBooking = masks.some((m) => m.includes("booking_new"));
     const hasMessage = masks.some((m) => m.includes("message"));
     add("webhooks", hasBooking && hasMessage, `booking ${hasBooking ? "yes" : "MISSING"}, messages ${hasMessage ? "yes" : "MISSING"}`);
+
+    const apps = await channexRequest<{ data?: { attributes: { property_id: string; application_code: string } }[] }>("GET", "/applications/installed");
+    const hasMessages = (apps.body?.data ?? []).some((a) => a.attributes.property_id === prop.channex_property_id && a.attributes.application_code === "channex_messages");
+    add("messages app", hasMessages, hasMessages ? "installed" : "MISSING, guests cannot be messaged");
 
     const events = await channexRequest<{ data?: { attributes: { name: string; inserted_at: string; payload?: { result?: string } } }[]; meta?: { total?: number } }>(
       "GET",

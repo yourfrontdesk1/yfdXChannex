@@ -217,6 +217,13 @@ export async function addListing(input: ListingInput): Promise<ListingResult> {
   if (hooks.error) return stop("webhooks", hooks.error);
   say("webhooks", true, hooks.detail);
 
+  // 4c. The Messages app. Without it Channex refuses every message to a guest on
+  // this property with a 403, so no portal link is ever sent. Missed on the no
+  // balcony listing and found when its first guests got nothing.
+  const messages = await installMessagesApp(propertyId);
+  if (messages.error) return stop("messages app", messages.error);
+  say("messages app", true, messages.detail);
+
   // 5. Availability from the portal, prices from the engine.
   const availability = await syncAvailability(propertyId);
   say("availability", true, `${availability.apartments} apartments, ${availability.bookings_held} bookings held, ${availability.rows_changed} nights written`);
@@ -291,6 +298,26 @@ type Webhook = {
   attributes: { callback_url: string; event_mask: string; send_data: boolean; headers: Record<string, string>; request_params?: Record<string, string> };
   relationships?: { property?: { data?: { id?: string } } };
 };
+
+/** Installs Channex's Messages app on a property, which guest messaging needs. */
+export async function installMessagesApp(propertyId: string): Promise<{ error: string | null; detail: string }> {
+  const { data: target } = await db().from("properties").select("channex_property_id").eq("id", propertyId).single();
+  const channexId = target?.channex_property_id as string | null;
+  if (!channexId) return { error: "The property is not on Channex yet", detail: "" };
+  const installed = await channexRequest<{ data?: { attributes: { property_id: string; application_code: string; application_id: string } }[] }>(
+    "GET",
+    "/applications/installed",
+  );
+  const all = installed.body?.data ?? [];
+  if (all.some((a) => a.attributes.property_id === channexId && a.attributes.application_code === "channex_messages")) {
+    return { error: null, detail: "Already installed" };
+  }
+  const appId = all.find((a) => a.attributes.application_code === "channex_messages")?.attributes.application_id;
+  const res = await channexRequest("POST", "/applications/install", {
+    application_installation: { property_id: channexId, application_code: "channex_messages", ...(appId ? { application_id: appId } : {}) },
+  });
+  return res.ok ? { error: null, detail: "Installed" } : { error: `Messages app: ${res.error}`, detail: "" };
+}
 
 /** Gives a property the same booking and guest webhooks a live listing has. */
 export async function copyWebhooks(propertyId: string): Promise<{ error: string | null; detail: string }> {
