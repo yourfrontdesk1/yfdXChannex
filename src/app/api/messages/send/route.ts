@@ -3,6 +3,7 @@ import { authorised } from "@/lib/auth";
 import { sendGuestMessage } from "@/lib/messages";
 import { threadFor } from "@/lib/guest-link";
 import { db } from "@/lib/db";
+import { markPortalLinkSent } from "@/lib/portal";
 
 export const dynamic = "force-dynamic";
 
@@ -87,6 +88,14 @@ export async function POST(request: Request) {
       .from("inbound_bookings")
       .update({ link_sent_at: new Date().toISOString() })
       .or(`ota_reservation_code.eq.${externalRef},ota_reservation_code.eq.${externalRef.replace(/^[A-Z]{3}-/, "")}`);
+  }
+
+  // And on the guest portal itself, so its own "Link sent" badge is true. The
+  // portal knows the booking as BDC-6276994350 whichever way it was asked. Only
+  // the first send is stamped; a later message is not a second link.
+  if (externalRef) {
+    const portalRef = /^[A-Z]{3}-/.test(externalRef) ? externalRef : `BDC-${externalRef}`;
+    await markPortalLinkSent(portalRef).catch(() => null);
   }
 
   return NextResponse.json({ ok: true, thread_id: threadId });
