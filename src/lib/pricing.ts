@@ -355,6 +355,33 @@ export async function priceProperty(propertyId: string, horizon: Horizon, declar
   };
   const commissionPct = setting("channel_commission_pct", 0);
   const taxPerPerson = setting("tourist_tax_per_person", 0);
+
+  // Dated floors: "nothing in August 2027 below £1,500 a night". Held in
+  // hub_config as `date_floors`, a JSON list of { from, to, min_published,
+  // properties }, so Leon can add or lift one without a deploy. The figure is
+  // what the guest sees on the channel, so it is turned into net here the same
+  // way every other price is, at one guest, which is the dearest net and so the
+  // one that keeps every plan at or above it once grossed up again.
+  type DateFloor = { from: string; to: string; min_published: number; properties?: string[] };
+  let dateFloors: DateFloor[] = [];
+  try {
+    const raw = (cfg ?? []).find((c) => c.key === "date_floors")?.value;
+    const parsed = raw ? JSON.parse(String(raw)) : [];
+    if (Array.isArray(parsed)) {
+      dateFloors = parsed.filter((f): f is DateFloor =>
+        typeof f?.from === "string" && typeof f?.to === "string" && Number.isFinite(Number(f?.min_published)));
+    }
+  } catch {
+    // A malformed entry must not stop the whole building being priced.
+    dateFloors = [];
+  }
+  const dateFloorNet = (date: string): number | null => {
+    const hits = dateFloors.filter((f) =>
+      date >= f.from && date <= f.to && (!f.properties?.length || f.properties.includes(propertyId)));
+    if (hits.length === 0) return null;
+    const published = Math.max(...hits.map((f) => Number(f.min_published)));
+    return Math.ceil(netOf(published, 1, commissionPct, taxPerPerson));
+  };
   const occupancyOf = new Map<string, number>((plans ?? []).map((p) => [p.id as string, Number(p.occupancy ?? 2)]));
 
   const rows: { property_id: string; room_type_id: string; rate_plan_id: string; date: string; rate: number }[] = [];
@@ -407,8 +434,11 @@ export async function priceProperty(propertyId: string, horizon: Horizon, declar
       );
 
       const raw = Number(rule.base_rate) * occupancy * compression * lead * evented * pace * orphan;
-      const floor = Number(rule.floor_rate);
-      const ceiling = Number(rule.ceiling_rate);
+      // A dated floor outranks the room type's own fence on its nights, and
+      // lifts the ceiling with it so the two can never cross.
+      const datedFloor = dateFloorNet(date);
+      const floor = Math.max(Number(rule.floor_rate), datedFloor ?? 0);
+      const ceiling = Math.max(Number(rule.ceiling_rate), floor);
       const target = Math.round(Math.min(ceiling, Math.max(floor, raw)));
 
       // Nothing lurches. A night walks toward what it is worth a few percent at
@@ -452,7 +482,7 @@ export async function priceProperty(propertyId: string, horizon: Horizon, declar
           previous: was ?? null,
           factors: {
             base: Number(rule.base_rate), sold, occupancy, compression, lead, pace, orphan,
-            event: evented, days_out: daysOut, raw: Math.round(raw), target,
+            event: evented, days_out: daysOut, raw: Math.round(raw), target, dated_floor: datedFloor,
             typical_sold_at_lead: typicalSoldAt(daysOut) ?? null,
           },
         },
