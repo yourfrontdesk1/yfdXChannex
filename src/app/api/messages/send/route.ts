@@ -26,7 +26,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
   }
 
-  let body: { thread_id?: string; message?: string; external_ref?: string };
+  let body: { thread_id?: string; message?: string; external_ref?: string; no_mirror?: boolean };
   try {
     body = (await request.json()) as typeof body;
   } catch {
@@ -99,7 +99,8 @@ export async function POST(request: Request) {
     await markPortalLinkSent(portalRef).catch(() => null);
   }
 
-  if (externalRef) {
+  // The YourFrontDesk Inbox stores what it sends itself, so it asks for no copy.
+  if (externalRef && !body.no_mirror) {
     await mirrorToYourFrontDesk({ otaReservationCode: externalRef }, { kind: "message", sender: "host", content: message });
   }
 

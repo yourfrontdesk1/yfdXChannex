@@ -67,6 +67,8 @@ const EXPECTED_GAP_MINUTES: Record<string, number> = {
   backtest: 2880,
   // Hourly. A failed audit records no success, so two missed hours turn it red.
   audit: 150,
+  // Daily at 9 UTC, 10 or 11 in Gibraltar.
+  reminders: 1560,
 };
 
 /**
@@ -107,6 +109,7 @@ const SWITCHED_BY: Record<string, string> = {
   auto_link_enabled: "send-links",
   auto_reply_enabled: "answer-messages",
   pricing_enabled: "pricing-near",
+  reminders_enabled: "reminders",
 };
 
 export async function health(): Promise<{ healthy: boolean; jobs: JobHealth[]; closures: number }> {
