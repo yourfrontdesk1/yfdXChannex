@@ -65,6 +65,8 @@ const EXPECTED_GAP_MINUTES: Record<string, number> = {
   "answer-messages": 20,
   "retry-forward": 45,
   backtest: 2880,
+  // Hourly. A failed audit records no success, so two missed hours turn it red.
+  audit: 150,
 };
 
 /**

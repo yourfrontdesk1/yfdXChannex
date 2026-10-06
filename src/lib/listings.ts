@@ -19,7 +19,7 @@ import { fullSync } from "./fullsync";
  *     codes come from Booking.com rather than being typed in.
  *  2. Checks every apartment exists in the guest portal and sells nowhere else.
  *  3. Writes the property, room types, rate plans and price fence to the hub.
- *  4. Creates it all on Channex.
+ *  4. Creates it all on Channex, with its own booking and message webhooks.
  *  5. Works out availability from the portal and prices from the engine.
  *  6. Connects Booking.com, switched off, and asks Channex what blocks it.
  *  7. If asked to go live: switches it on, sends a full sync, and then reads
@@ -208,6 +208,15 @@ export async function addListing(input: ListingInput): Promise<ListingResult> {
   if (failed.length) return stop("channex", failed.map((f) => `${f.entity} ${f.name}: ${f.error}`).join("; "));
   say("channex", true, provisioned.filter((s) => s.created).map((s) => `${s.entity} ${s.name}`).join(", ") || "already there");
 
+  // 4b. Webhooks. Channex binds each one to a single property, so a new listing
+  // without its own hears about bookings only from the fifteen minute poll, and
+  // about guest messages not at all. Copied from a live listing, same callback,
+  // same mask, same secret header. Found missing on the no balcony listing on
+  // 6 October, after it had gone live.
+  const hooks = await copyWebhooks(propertyId);
+  if (hooks.error) return stop("webhooks", hooks.error);
+  say("webhooks", true, hooks.detail);
+
   // 5. Availability from the portal, prices from the engine.
   const availability = await syncAvailability(propertyId);
   say("availability", true, `${availability.apartments} apartments, ${availability.bookings_held} bookings held, ${availability.rows_changed} nights written`);
@@ -275,6 +284,50 @@ export async function goLive(propertyId: string, result?: ListingResult): Promis
   await hub.from("channels").update({ is_active: false }).eq("channex_channel_id", channelId);
   say("booking.com", false, `Booking.com refused, channel switched back off: ${verdict.reason}`);
   return out;
+}
+
+type Webhook = {
+  id: string;
+  attributes: { callback_url: string; event_mask: string; send_data: boolean; headers: Record<string, string>; request_params?: Record<string, string> };
+  relationships?: { property?: { data?: { id?: string } } };
+};
+
+/** Gives a property the same booking and guest webhooks a live listing has. */
+export async function copyWebhooks(propertyId: string): Promise<{ error: string | null; detail: string }> {
+  const hub = db();
+  const { data: target } = await hub.from("properties").select("channex_property_id").eq("id", propertyId).single();
+  const channexId = target?.channex_property_id as string | null;
+  if (!channexId) return { error: "The property is not on Channex yet", detail: "" };
+
+  const list = await channexRequest<{ data?: Webhook[] }>("GET", "/webhooks?pagination[limit]=100");
+  const all = list.body?.data ?? [];
+  const byProperty = (w: Webhook) => w.relationships?.property?.data?.id;
+  const have = new Set(all.filter((w) => byProperty(w) === channexId).map((w) => w.attributes.event_mask));
+
+  // The template is whichever other property already carries the most hooks.
+  const counts = new Map<string, number>();
+  for (const w of all) if (byProperty(w) && byProperty(w) !== channexId) counts.set(byProperty(w)!, (counts.get(byProperty(w)!) ?? 0) + 1);
+  const template = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (!template) return { error: "No live listing has webhooks to copy", detail: "" };
+
+  const made: string[] = [];
+  for (const w of all.filter((w) => byProperty(w) === template)) {
+    if (have.has(w.attributes.event_mask)) continue;
+    const res = await channexRequest<{ data?: { id?: string } }>("POST", "/webhooks", {
+      webhook: {
+        property_id: channexId,
+        callback_url: w.attributes.callback_url,
+        event_mask: w.attributes.event_mask,
+        send_data: w.attributes.send_data,
+        headers: w.attributes.headers,
+        request_params: w.attributes.request_params ?? {},
+        is_active: true,
+      },
+    });
+    if (!res.ok) return { error: `Webhook ${w.attributes.event_mask}: ${res.error}`, detail: "" };
+    made.push(w.attributes.event_mask);
+  }
+  return { error: null, detail: made.length ? `Registered ${made.join(" and ")}` : "Already registered" };
 }
 
 /** Reads what Booking.com itself answered to the sync after `since`. */
