@@ -4,6 +4,7 @@ import { sendGuestMessage } from "@/lib/messages";
 import { threadFor } from "@/lib/guest-link";
 import { db } from "@/lib/db";
 import { markPortalLinkSent } from "@/lib/portal";
+import { mirrorToYourFrontDesk } from "@/lib/mirror";
 
 export const dynamic = "force-dynamic";
 
@@ -96,6 +97,10 @@ export async function POST(request: Request) {
   if (externalRef) {
     const portalRef = /^[A-Z]{3}-/.test(externalRef) ? externalRef : `BDC-${externalRef}`;
     await markPortalLinkSent(portalRef).catch(() => null);
+  }
+
+  if (externalRef) {
+    await mirrorToYourFrontDesk({ otaReservationCode: externalRef }, { kind: "message", sender: "host", content: message });
   }
 
   return NextResponse.json({ ok: true, thread_id: threadId });

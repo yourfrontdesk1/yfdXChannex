@@ -1,6 +1,7 @@
 import { db } from "./db";
 import { channexRequest } from "./channex";
 import { sendGuestMessage } from "./messages";
+import { mirrorToYourFrontDesk } from "./mirror";
 
 
 /**
@@ -60,6 +61,8 @@ const MAX_REPLIES_PER_THREAD_PER_DAY = 8;
 
 async function escalate(threadId: string, bookingId: string | null, reason: string, message: string | null) {
   await db().from("escalations").insert({ thread_id: threadId, channex_booking_id: bookingId, reason, message });
+  // Onto the Replies page in YourFrontDesk, and an email to Leon and Betty.
+  await mirrorToYourFrontDesk({ channexBookingId: bookingId }, { kind: "escalation", guest_message: message, reason });
 }
 
 export type ReplyResult = {
@@ -179,6 +182,10 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
       .from("inbound_bookings")
       .select("guest_name, arrival_date, departure_date, portal_url, status, ota_reservation_code")
       .eq("channex_booking_id", message.channex_booking_id as string)
+      // A booking has a row per revision. Without this a modified booking
+      // returned several, maybeSingle gave nothing, and the guest went unanswered.
+      .order("received_at", { ascending: false })
+      .limit(1)
       .maybeSingle();
 
     // No booking behind the thread means no facts to answer with. A person
@@ -217,6 +224,7 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
         if (sent.error) result.errors.push(sent.error);
         continue;
       }
+      await mirrorToYourFrontDesk({ channexBookingId: message.channex_booking_id as string | null }, { kind: "message", sender: "host", content: answer.trim() });
 
       await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
       await supabase.from("guest_messages").insert({

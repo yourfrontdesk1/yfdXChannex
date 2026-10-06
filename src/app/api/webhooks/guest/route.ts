@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authorised } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { mirrorToYourFrontDesk } from "@/lib/mirror";
 
 export const dynamic = "force-dynamic";
 
@@ -52,6 +53,17 @@ export async function POST(request: Request) {
         { onConflict: "channex_message_id" },
       );
       if (error) throw error;
+      const text = (payload.message ?? payload.body ?? payload.text ?? "") as string;
+      const fromGuest = String(payload.sender ?? payload.author ?? "guest").toLowerCase() === "guest";
+      // Only the guest's side here. Our own messages also come back through this
+      // webhook, and they were copied when they were sent, so copying them again
+      // would show every reply twice.
+      if (text && fromGuest) {
+        await mirrorToYourFrontDesk(
+          { channexBookingId: (payload.booking_id ?? null) as string | null, otaReservationCode: (payload.ota_reservation_code ?? null) as string | null },
+          { kind: "message", sender: "guest", content: text, sent_at: (payload.inserted_at ?? payload.sent_at ?? null) as string | null, message_id: id ?? null },
+        );
+      }
       return NextResponse.json({ ok: true, event, stored: "message" });
     }
 
