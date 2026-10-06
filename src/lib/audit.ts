@@ -14,6 +14,7 @@ import { channexRequest } from "./channex";
  *  - Booking.com's own answer to the latest sync was success
  *  - Channex holds the same availability and price as the hub for 30 nights
  *  - no booking in the last 7 days failed to reach YourFrontDesk
+ *  - every guest arriving in the next 60 days has been sent their portal link
  */
 
 export type AuditCheck = { property: string; check: string; ok: boolean; detail: string };
@@ -107,6 +108,27 @@ export async function auditListings(): Promise<{ checks: AuditCheck[]; failed: n
       .gte("received_at", since)
       .is("forwarded_at", null);
     add("bookings reached YourFrontDesk", !(stuck ?? []).length, (stuck ?? []).length ? `${stuck!.length} not forwarded: ${stuck!.map((s) => s.ota_reservation_code).join(", ")}` : "none stuck in 7 days");
+
+    // Every guest gets their portal link, every time. A new booking arriving in
+    // the next 60 days with no link after 15 minutes means a guest who cannot
+    // check in. Bookings further out are left alone on purpose: a link for a
+    // stay next summer was not wanted (Leon, 6 October 2026).
+    const soon = iso(new Date(Date.now() + 60 * 86400000));
+    const settled = new Date(Date.now() - 15 * 60000).toISOString();
+    const { data: unlinked } = await hub
+      .from("inbound_bookings")
+      .select("ota_reservation_code, guest_name, arrival_date, status")
+      .eq("property_id", c.property_id)
+      .eq("status", "new")
+      .is("link_sent_at", null)
+      .gte("arrival_date", iso(new Date()))
+      .lte("arrival_date", soon)
+      .lte("received_at", settled);
+    const cancelledCodes = new Set(
+      ((await hub.from("inbound_bookings").select("ota_reservation_code").eq("property_id", c.property_id).eq("status", "cancelled")).data ?? []).map((r) => r.ota_reservation_code),
+    );
+    const missing = (unlinked ?? []).filter((b) => !cancelledCodes.has(b.ota_reservation_code));
+    add("every guest got their link", missing.length === 0, missing.length ? `${missing.length} without: ${missing.map((b) => `${b.guest_name} (${b.arrival_date})`).join(", ")}` : "all sent");
   }
 
   return { checks, failed: checks.filter((c) => !c.ok).length };
