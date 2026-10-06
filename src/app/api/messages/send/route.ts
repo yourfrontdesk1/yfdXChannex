@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { authorised } from "@/lib/auth";
-import { channexRequest } from "@/lib/channex";
+import { sendGuestMessage } from "@/lib/messages";
 import { threadFor } from "@/lib/guest-link";
 import { db } from "@/lib/db";
 
@@ -36,6 +36,8 @@ export async function POST(request: Request) {
   if (!message) return NextResponse.json({ error: "message is required" }, { status: 400 });
 
   let threadId = (body.thread_id ?? "").trim();
+  let bookingId: string | null = null;
+  let channexPropertyId: string | null = null;
   if (!threadId) {
     if (!externalRef) {
       return NextResponse.json({ error: "thread_id or external_ref is required" }, { status: 400 });
@@ -46,7 +48,7 @@ export async function POST(request: Request) {
       .select("channex_booking_id, ota_reservation_code, property_id")
       // YourFrontDesk knows the booking as BDC-6639721282, this service stores
       // the bare number Channex sent. Match either, or a message never finds
-      // its thread and the guest is answered by nobody.
+      // its booking and the guest is answered by nobody.
       .or(`ota_reservation_code.eq.${externalRef},ota_reservation_code.eq.${externalRef.replace(/^[A-Z]{3}-/, "")}`)
       .order("received_at", { ascending: false })
       .limit(1)
@@ -59,25 +61,23 @@ export async function POST(request: Request) {
       .select("channex_property_id")
       .eq("id", booking.property_id as string)
       .maybeSingle();
-    const channexPropertyId = property?.channex_property_id as string | null;
+    channexPropertyId = property?.channex_property_id as string | null;
     if (!channexPropertyId) {
       return NextResponse.json({ error: "That property is not provisioned on Channex" }, { status: 409 });
     }
-    // A booking made before the guest ever wrote has no thread yet. That is a
-    // wait, not a failure, so the caller is told plainly rather than shown an error.
-    const found = await threadFor(
-      channexPropertyId,
-      (booking.channex_booking_id as string | null) ?? null,
-      (booking.ota_reservation_code as string | null) ?? externalRef,
-    );
-    if (!found) return NextResponse.json({ ok: false, reason: "no_thread" }, { status: 200 });
-    threadId = found;
+    bookingId = (booking.channex_booking_id as string | null) ?? null;
+    // A thread when the guest has already written; otherwise the booking itself,
+    // which opens the conversation. A new booking has no thread and must still
+    // get its link.
+    threadId =
+      (await threadFor(channexPropertyId, bookingId, (booking.ota_reservation_code as string | null) ?? externalRef)) ?? "";
   }
 
-  const res = await channexRequest("POST", `/message_threads/${threadId}/messages`, { message });
-  if (!res.ok) {
-    return NextResponse.json({ error: res.error ?? "Channex refused the message" }, { status: 502 });
+  const sent = await sendGuestMessage({ threadId: threadId || null, bookingId, text: message, propertyId: channexPropertyId });
+  if (!sent.ok) {
+    return NextResponse.json({ error: sent.error ?? "Channex refused the message" }, { status: 502 });
   }
+  threadId = sent.threadId ?? threadId;
 
   // Stamped here rather than in YourFrontDesk, because this is the moment it
   // actually left. A booking whose link was sent twice is a guest who thinks

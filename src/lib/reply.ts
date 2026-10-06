@@ -1,5 +1,6 @@
 import { db } from "./db";
 import { channexRequest } from "./channex";
+import { sendGuestMessage } from "./messages";
 
 
 /**
@@ -210,7 +211,7 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
         continue;
       }
 
-      const sent = await channexRequest("POST", `/message_threads/${threadId}/messages`, { message: answer.trim() });
+      const sent = await sendGuestMessage({ threadId, text: answer.trim() });
       if (!sent.ok) {
         result.failed++;
         if (sent.error) result.errors.push(sent.error);

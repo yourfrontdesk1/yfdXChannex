@@ -1,5 +1,6 @@
 import { db } from "./db";
 import { channexRequest } from "./channex";
+import { sendGuestMessage } from "./messages";
 
 /**
  * Sends a new guest their portal link on the OTA's own message thread.
@@ -167,24 +168,21 @@ export async function sendPendingGuestLinks(): Promise<LinkSendResult> {
       (booking.ota_reservation_code as string) ?? null,
     );
 
-    // No thread yet is normal: the OTA opens one when the guest first writes.
-    // The booking waits here and is picked up on the next pass.
-    if (!threadId) { result.no_thread++; continue; }
-
-    const sent = await channexRequest(
-      "POST",
-      `/message_threads/${threadId}/messages`,
-      {
-        message: welcomeMessage({
-          guest_name: (booking.guest_name as string | null) ?? null,
-          portal_url: booking.portal_url as string,
-          arrival_date: (booking.arrival_date as string | null) ?? null,
-          departure_date: (booking.departure_date as string | null) ?? null,
-          amount: booking.amount === null || booking.amount === undefined ? null : Number(booking.amount),
-          currency: (booking.currency as string | null) ?? null,
-        }),
-      },
-    );
+    // No thread yet is normal on a new booking; messaging the booking itself
+    // opens one, so the link is not left waiting for the guest to write first.
+    const sent = await sendGuestMessage({
+      threadId,
+      bookingId: (booking.channex_booking_id as string) ?? null,
+      propertyId: channexPropertyId,
+      text: welcomeMessage({
+        guest_name: (booking.guest_name as string | null) ?? null,
+        portal_url: booking.portal_url as string,
+        arrival_date: (booking.arrival_date as string | null) ?? null,
+        departure_date: (booking.departure_date as string | null) ?? null,
+        amount: booking.amount === null || booking.amount === undefined ? null : Number(booking.amount),
+        currency: (booking.currency as string | null) ?? null,
+      }),
+    });
 
     if (!sent.ok) {
       result.failed++;
