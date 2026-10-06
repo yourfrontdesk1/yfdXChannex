@@ -265,6 +265,7 @@ export default async function Home() {
       </div>
 
       <h2>Properties</h2>
+      <p><Link href="/listings/new">Add a Booking.com listing</Link></p>
 
       {error ? (
         <div className="card">

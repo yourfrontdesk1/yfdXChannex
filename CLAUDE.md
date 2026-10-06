@@ -71,6 +71,30 @@ provisions a property over the API. It is fine for one-off provisioning. It is
 - He works fast and types fast. If an instruction is ambiguous, prefer the
   narrower reading and say which you took.
 
+## Adding a Booking.com listing
+
+One call does it: the form at `/listings/new`, or `POST /api/listings` with
+`{ name, hotel_id, room_types: [{ name, apartments, guests, floor, base, ceiling }], activate }`.
+`src/lib/listings.ts` holds every step and the reason for it. Do not redo the
+steps by hand; if one is wrong, fix it there.
+
+- Leon first approves Channex.io as connectivity provider in the extranet. The
+  hotel id and which apartments are all he needs to give.
+- Which apartments sell as which room type lives in `room_types.apartments`, not
+  in code. A trigger refuses one apartment under two room types. Availability,
+  the apartment picker and pricing all read it, so a new listing needs no deploy.
+- **Channex accepting a call is not Booking.com accepting it.** Read
+  `/channel_events` for the channel and the logs of the latest `sync`; the
+  Booking.com XML answer is the truth. `goLive` does this and switches the
+  channel back off if Booking.com refuses.
+- `OCCUPANCY_EXCEEDS_MAX_PERSONS` means the extranet room is set for fewer guests
+  than we price for. Leon fixes it in the extranet (room details and pricing per
+  guest); `mapping_details` can keep reporting the old number for a while after.
+- Resend everything to Booking.com with `POST /channels/{id}/full_sync` on
+  Channex; a hub full sync of unchanged values sends nothing on.
+- YourFrontDesk must hold a `vs:<room>` property for every apartment, or the
+  booking reaches the portal but files nowhere (`linked_not_filed`).
+
 ## Do not touch
 
 - The **Victory Suites guest portal** (`~/workspace/victory-suites-guest-portal-`)

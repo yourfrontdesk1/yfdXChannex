@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { db } from "./db";
-import { ROOMS_BY_PROPERTY, roomsOfProperty } from "./parkside";
+import { roomsByProperty } from "./parkside";
 
 /**
  * What a night is worth.
@@ -198,12 +198,13 @@ function portalClient() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-/** Every property in ROOMS_BY_PROPERTY, one after another, so one failing does not stop the others. */
+/** Every active property with apartments declared, one after another, so one failing does not stop the others. */
 export async function priceAll(horizon: Horizon): Promise<(PricingResult | { property_id: string; error: string })[]> {
   const results: (PricingResult | { property_id: string; error: string })[] = [];
-  for (const propertyId of Object.keys(ROOMS_BY_PROPERTY)) {
+  const all = await roomsByProperty();
+  for (const propertyId of Object.keys(all)) {
     try {
-      results.push(await priceProperty(propertyId, horizon));
+      results.push(await priceProperty(propertyId, horizon, Object.values(all[propertyId]).flat()));
     } catch (e) {
       results.push({ property_id: propertyId, error: e instanceof Error ? e.message : String(e) });
     }
@@ -213,9 +214,9 @@ export async function priceAll(horizon: Horizon): Promise<(PricingResult | { pro
   return results;
 }
 
-export async function priceProperty(propertyId: string, horizon: Horizon): Promise<PricingResult> {
+export async function priceProperty(propertyId: string, horizon: Horizon, declared?: string[]): Promise<PricingResult> {
   const hub = db();
-  const rooms = roomsOfProperty(propertyId);
+  const rooms = declared ?? Object.values((await roomsByProperty())[propertyId] ?? {}).flat();
   if (rooms.length === 0) throw new Error(`No apartments are declared for property ${propertyId}`);
   const today = new Date(`${iso(new Date())}T00:00:00Z`);
   const [firstOffset, lastOffset] = horizon === "all" ? [0, 499] : WINDOW[horizon];
