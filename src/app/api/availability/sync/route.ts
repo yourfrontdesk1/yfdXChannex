@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { authorised } from "@/lib/auth";
-import { syncParksideAvailability } from "@/lib/parkside";
+import { syncAllAvailability } from "@/lib/parkside";
 import { runJob } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
 /**
- * Keeps the grid honest about Parkside. Availability that goes stale is how a
+ * Keeps the grid honest for every property the portal feeds. Availability that goes stale is how a
  * night gets sold twice, so this runs on a schedule rather than when someone
  * remembers. Writes only the nights that moved; the outbox and worker take it
  * from there.
@@ -17,7 +17,7 @@ async function run(request: Request) {
     return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
   }
   try {
-    return NextResponse.json(await runJob("availability-sync", syncParksideAvailability));
+    return NextResponse.json(await runJob("availability-sync", syncAllAvailability));
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

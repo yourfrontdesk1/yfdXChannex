@@ -358,13 +358,15 @@ async function forwardToYourFrontDesk(property: Property, revision: BookingRevis
 
   const room = revision.rooms?.[0];
   let roomType: string | null = null;
+  let roomTypeProperty: string | null = null;
   if (room?.room_type_id) {
     const { data: rt } = await supabase
       .from("room_types")
-      .select("name")
+      .select("name, property_id")
       .eq("channex_room_type_id", room.room_type_id)
       .maybeSingle();
     roomType = (rt?.name as string | null) ?? null;
+    roomTypeProperty = (rt?.property_id as string | null) ?? null;
   }
 
   // Somebody has to choose the flat. The portal will not: it resolves an
@@ -373,7 +375,7 @@ async function forwardToYourFrontDesk(property: Property, revision: BookingRevis
   // no apartment anywhere, which is the failure nobody would notice.
   let apartment: string | null = null;
   let roomNote: string | null = null;
-  if (event !== "booking.cancelled" && roomType) {
+  if (event !== "booking.cancelled" && roomType && roomTypeProperty) {
     // A booking that has already been given a flat keeps it. Choosing again on a
     // retry or an amendment hands the guest a second apartment and leaves the
     // first one held against nobody.
@@ -386,7 +388,7 @@ async function forwardToYourFrontDesk(property: Property, revision: BookingRevis
 
     const pick = apartment
       ? { room: apartment, reason: null as string | null, order: [] as string[] }
-      : await pickFreeApartment(roomType, revision.arrival_date, revision.departure_date);
+      : await pickFreeApartment(roomTypeProperty, roomType, revision.arrival_date, revision.departure_date);
     apartment = pick.room;
     if (apartment && !already?.apartment) {
       await supabase.from("inbound_bookings").update({ apartment }).eq("revision_id", revisionId);

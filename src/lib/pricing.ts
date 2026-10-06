@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { db } from "./db";
-import { PARKSIDE_PROPERTY_ID, PARKSIDE_ROOMS } from "./parkside";
+import { ROOMS_BY_PROPERTY, roomsOfProperty } from "./parkside";
 
 /**
  * What a night is worth.
@@ -30,6 +30,7 @@ const WINDOW: Record<Exclude<Horizon, "all">, [number, number]> = {
 };
 
 export type PricingResult = {
+  property_id: string;
   horizon: Horizon;
   from: string;
   to: string;
@@ -197,8 +198,25 @@ function portalClient() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
+/** Every property in ROOMS_BY_PROPERTY, one after another, so one failing does not stop the others. */
+export async function priceAll(horizon: Horizon): Promise<(PricingResult | { property_id: string; error: string })[]> {
+  const results: (PricingResult | { property_id: string; error: string })[] = [];
+  for (const propertyId of Object.keys(ROOMS_BY_PROPERTY)) {
+    try {
+      results.push(await priceProperty(propertyId, horizon));
+    } catch (e) {
+      results.push({ property_id: propertyId, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  const failed = results.filter((r) => r.error);
+  if (failed.length) throw new Error(failed.map((f) => `${f.property_id}: ${f.error}`).join("; "));
+  return results;
+}
+
+export async function priceProperty(propertyId: string, horizon: Horizon): Promise<PricingResult> {
   const hub = db();
+  const rooms = roomsOfProperty(propertyId);
+  if (rooms.length === 0) throw new Error(`No apartments are declared for property ${propertyId}`);
   const today = new Date(`${iso(new Date())}T00:00:00Z`);
   const [firstOffset, lastOffset] = horizon === "all" ? [0, 499] : WINDOW[horizon];
   const from = iso(addDays(today, firstOffset));
@@ -207,7 +225,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
   const { data: roomTypes, error: rtError } = await hub
     .from("room_types")
     .select("id, name, count_of_rooms")
-    .eq("property_id", PARKSIDE_PROPERTY_ID);
+    .eq("property_id", propertyId);
   if (rtError) throw new Error(`Room types: ${rtError.message}`);
 
   const { data: rules, error: ruleError } = await hub.from("pricing_rules").select("*");
@@ -246,7 +264,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
       let query = hub
         .from("ari")
         .select("room_type_id, rate_plan_id, date, availability, rate")
-        .eq("property_id", PARKSIDE_PROPERTY_ID)
+        .eq("property_id", propertyId)
         .gte("date", from)
         .lte("date", to)
         .order("date", { ascending: true })
@@ -266,7 +284,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
   // year of its own bookings, using when each one was made.
   const portal = portalClient();
   const yearAgo = iso(addDays(today, -365));
-  const { data: apartments } = await portal.from("properties").select("id").in("room_number", PARKSIDE_ROOMS);
+  const { data: apartments } = await portal.from("properties").select("id").in("room_number", rooms);
   const apartmentIds = (apartments ?? []).map((a) => a.id as string);
   const { data: history } = await portal
     .from("bookings")
@@ -290,7 +308,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
   }
   // For each distance out, the share of a night's eventual bookings that were
   // already made by then, averaged over every night in the year.
-  const UNITS = 12;
+  const UNITS = rooms.length;
   for (let lead = 0; lead <= 365; lead++) {
     let sold = 0;
     let of = 0;
@@ -426,7 +444,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
         ceiling,
         was,
         log: {
-          property_id: PARKSIDE_PROPERTY_ID,
+          property_id: propertyId,
           room_type_id: rt.id,
           date,
           price,
@@ -469,7 +487,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
       const storedNow = currentPrice.get(`${p.planId}|${date}`);
       if (storedNow !== undefined && storedNow !== null && Math.round(Number(storedNow)) === published) { unchanged++; continue; }
 
-      rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: p.rtId, rate_plan_id: p.planId, date, rate: published });
+      rows.push({ property_id: propertyId, room_type_id: p.rtId, rate_plan_id: p.planId, date, rate: published });
       (p.log.factors as Record<string, unknown>).net = p.price;
       (p.log.factors as Record<string, unknown>).commission_pct = commissionPct;
       (p.log.factors as Record<string, unknown>).tourist_tax = taxPerPerson * (occupancyOf.get(p.planId) ?? 2);
@@ -481,7 +499,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
         const derived = await publishedPrice(derivedNet, occupancyOf.get(derivedId) ?? 2, commissionPct, taxPerPerson);
         const derivedWas = currentPrice.get(`${derivedId}|${date}`);
         if (derivedWas !== undefined && derivedWas !== null && Math.round(derivedWas) === derived) continue;
-        rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: p.rtId, rate_plan_id: derivedId, date, rate: derived });
+        rows.push({ property_id: propertyId, room_type_id: p.rtId, rate_plan_id: derivedId, date, rate: derived });
       }
       logs.push(p.log);
     }
@@ -496,6 +514,7 @@ export async function priceParkside(horizon: Horizon): Promise<PricingResult> {
   }
 
   return {
+    property_id: propertyId,
     horizon,
     from,
     to,

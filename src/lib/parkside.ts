@@ -34,11 +34,41 @@ export const ROOMS_BY_TYPE: Record<string, string[]> = {
 
 export const PARKSIDE_ROOMS = Object.values(ROOMS_BY_TYPE).flat();
 
-const TYPE_OF_ROOM: Record<string, string> = Object.fromEntries(
-  Object.entries(ROOMS_BY_TYPE).flatMap(([type, rooms]) => rooms.map((room) => [room, type])),
-);
+/**
+ * Victory Suites Studios with No Balcony, Booking.com hotel 16556651. The two
+ * studios that came off Parkside on 5 October because they were never park
+ * facing. Same building, same portal, its own listing.
+ */
+export const NO_BALCONY_PROPERTY_ID = "eddf623e-0b71-4777-9de3-6e889d90fd03";
+
+/**
+ * Every hub property whose availability is read from the guest portal, and which
+ * apartments sell as which of its room types. A room type name only has to be
+ * unique within its own property.
+ */
+export const ROOMS_BY_PROPERTY: Record<string, Record<string, string[]>> = {
+  [PARKSIDE_PROPERTY_ID]: ROOMS_BY_TYPE,
+  [NO_BALCONY_PROPERTY_ID]: {
+    "Standard Studio": ["1.02", "6.02"],
+  },
+};
+
+export const roomsOfProperty = (propertyId: string) => Object.values(ROOMS_BY_PROPERTY[propertyId] ?? {}).flat();
+
+// No apartment may sell under two properties at once, or both would count it free
+// and the same night would go twice.
+{
+  const seen = new Map<string, string>();
+  for (const [propertyId, types] of Object.entries(ROOMS_BY_PROPERTY)) {
+    for (const room of Object.values(types).flat()) {
+      if (seen.has(room)) throw new Error(`Apartment ${room} is declared under two properties`);
+      seen.set(room, propertyId);
+    }
+  }
+}
 
 export type AvailabilitySyncResult = {
+  property_id: string;
   apartments: number;
   units: Record<string, number>;
   bookings_held: number;
@@ -59,9 +89,30 @@ function portalClient() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-export async function syncParksideAvailability(): Promise<AvailabilitySyncResult> {
+/** Every property in ROOMS_BY_PROPERTY, one after another, so one failing does not hide the others. */
+export async function syncAllAvailability(): Promise<(AvailabilitySyncResult | { property_id: string; error: string })[]> {
+  const results: (AvailabilitySyncResult | { property_id: string; error: string })[] = [];
+  for (const propertyId of Object.keys(ROOMS_BY_PROPERTY)) {
+    try {
+      results.push(await syncAvailability(propertyId));
+    } catch (e) {
+      results.push({ property_id: propertyId, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  const failed = results.filter((r) => r.error);
+  if (failed.length) throw new Error(failed.map((f) => `${f.property_id}: ${f.error}`).join("; "));
+  return results;
+}
+
+export async function syncAvailability(propertyId: string): Promise<AvailabilitySyncResult> {
   const hub = db();
   const portal = portalClient();
+  const roomsByType = ROOMS_BY_PROPERTY[propertyId];
+  if (!roomsByType) throw new Error(`No apartments are declared for property ${propertyId}`);
+  const allRooms = Object.values(roomsByType).flat();
+  const typeOfRoom: Record<string, string> = Object.fromEntries(
+    Object.entries(roomsByType).flatMap(([type, rooms]) => rooms.map((room) => [room, type])),
+  );
 
   const today = new Date(iso(new Date()) + "T00:00:00Z");
   const dates = Array.from({ length: SYNC_DAYS }, (_, i) => iso(addDays(today, i)));
@@ -71,19 +122,19 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
   const { data: apartments, error: aptError } = await portal
     .from("properties")
     .select("id, room_number, type")
-    .in("room_number", PARKSIDE_ROOMS);
+    .in("room_number", allRooms);
   if (aptError) throw new Error(`Portal apartments: ${aptError.message}`);
 
   // A missing apartment would silently overstate availability, so refuse rather
   // than publish a number we cannot stand behind.
-  if (!apartments || apartments.length !== PARKSIDE_ROOMS.length) {
-    throw new Error(`Expected ${PARKSIDE_ROOMS.length} Parkside apartments, the portal returned ${apartments?.length ?? 0}`);
+  if (!apartments || apartments.length !== allRooms.length) {
+    throw new Error(`Expected ${allRooms.length} apartments, the portal returned ${apartments?.length ?? 0}`);
   }
 
-  const typeOfApartment = new Map(apartments.map((a) => [a.id as string, TYPE_OF_ROOM[a.room_number as string]]));
+  const typeOfApartment = new Map(apartments.map((a) => [a.id as string, typeOfRoom[a.room_number as string]]));
   const unitsOfType: Record<string, number> = {};
   for (const a of apartments) {
-    const type = TYPE_OF_ROOM[a.room_number as string];
+    const type = typeOfRoom[a.room_number as string];
     unitsOfType[type] = (unitsOfType[type] ?? 0) + 1;
   }
 
@@ -116,7 +167,7 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
   const { data: roomTypes, error: rtError } = await hub
     .from("room_types")
     .select("id, name")
-    .eq("property_id", PARKSIDE_PROPERTY_ID);
+    .eq("property_id", propertyId);
   if (rtError) throw new Error(`Hub room types: ${rtError.message}`);
 
   // PostgREST caps a select at 1000 rows. Four room types over 500 days is two
@@ -129,7 +180,7 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
     const { data: page, error: ariError } = await hub
       .from("ari")
       .select("room_type_id, date, availability")
-      .eq("property_id", PARKSIDE_PROPERTY_ID)
+      .eq("property_id", propertyId)
       .is("rate_plan_id", null)
       .gte("date", from)
       .lte("date", to)
@@ -145,13 +196,13 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
   for (const rt of roomTypes ?? []) {
     // A room type with no apartments declared would publish zero for every
     // night, quietly shutting a room that is in fact for sale.
-    if (!ROOMS_BY_TYPE[rt.name as string]) throw new Error(`No apartments are declared for room type "${rt.name}"`);
+    if (!roomsByType[rt.name as string]) throw new Error(`No apartments are declared for room type "${rt.name}"`);
     const total = unitsOfType[rt.name as string] ?? 0;
     for (const date of dates) {
       const sold = soldOn.get(date)?.[rt.name as string] ?? 0;
       const availability = Math.max(0, total - sold);
       if (existing.get(`${rt.id}|${date}`) === availability) { alreadyCorrect++; continue; }
-      rows.push({ property_id: PARKSIDE_PROPERTY_ID, room_type_id: rt.id as string, rate_plan_id: null, date, availability });
+      rows.push({ property_id: propertyId, room_type_id: rt.id as string, rate_plan_id: null, date, availability });
     }
   }
 
@@ -163,6 +214,7 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
   }
 
   return {
+    property_id: propertyId,
     apartments: apartments.length,
     units: unitsOfType,
     bookings_held: held.length,
@@ -196,11 +248,12 @@ export async function syncParksideAvailability(): Promise<AvailabilitySyncResult
 const ROTATION_WINDOW_DAYS = 90;
 
 export async function pickFreeApartment(
+  propertyId: string,
   roomTypeName: string,
   checkIn: string,
   checkOut: string,
 ): Promise<{ room: string | null; considered: number; reason: string | null; order: string[] }> {
-  const rooms = ROOMS_BY_TYPE[roomTypeName];
+  const rooms = ROOMS_BY_PROPERTY[propertyId]?.[roomTypeName];
   if (!rooms) return { room: null, considered: 0, reason: `No apartments are declared for "${roomTypeName}"`, order: [] };
 
   const portal = portalClient();

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { authorised } from "@/lib/auth";
-import { priceParkside, type Horizon } from "@/lib/pricing";
+import { priceAll, type Horizon } from "@/lib/pricing";
 import { runJob, enabled } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
@@ -9,7 +9,7 @@ export const maxDuration = 120;
 const HORIZONS = new Set(["near", "mid", "far", "all"]);
 
 /**
- * Reprices Parkside. Split by horizon because the next fortnight moves all day
+ * Reprices every property. Split by horizon because the next fortnight moves all day
  * and next summer does not, and pushing an unchanged price is churn that buys
  * nothing and spends the rate limit.
  */
@@ -25,7 +25,7 @@ async function run(request: Request) {
     if (!(await enabled("pricing_enabled"))) {
       return NextResponse.json({ skipped: "pricing_enabled is false in hub_config" });
     }
-    return NextResponse.json(await runJob(`pricing-${asked}`, () => priceParkside(asked as Horizon)));
+    return NextResponse.json(await runJob(`pricing-${asked}`, () => priceAll(asked as Horizon)));
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }
