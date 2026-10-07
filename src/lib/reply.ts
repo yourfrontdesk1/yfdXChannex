@@ -56,7 +56,7 @@ const HARD_ESCALATION = [
 ];
 
 /** No thread gets answered more often than this, so nothing can loop. */
-const MIN_SECONDS_BETWEEN_REPLIES = 120;
+const MIN_SECONDS_BETWEEN_REPLIES = 30;
 const MAX_REPLIES_PER_THREAD_PER_DAY = 8;
 
 /**
@@ -174,6 +174,18 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
   if (error) throw new Error(`Reading messages: ${error.message}`);
 
   for (const message of pending ?? []) {
+    // Claimed first. The webhook now answers the moment a message lands and the
+    // two minute job still runs as the backup; without a claim both could answer
+    // the same message. A claim older than two minutes is a run that died, so it
+    // can be taken again.
+    const stale = new Date(Date.now() - 120000).toISOString();
+    const { data: claimed } = await supabase
+      .from("guest_messages")
+      .update({ claimed_at: new Date().toISOString() })
+      .eq("id", message.id as string)
+      .or(`claimed_at.is.null,claimed_at.lt.${stale}`)
+      .select("id");
+    if (!claimed?.length) continue;
     result.considered++;
     const threadId = message.thread_id as string;
     const bookingId = (message.channex_booking_id as string) ?? null;

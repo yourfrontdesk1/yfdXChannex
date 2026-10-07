@@ -1,4 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
+import { answerPendingMessages } from "@/lib/reply";
+import { runJob, enabled } from "@/lib/ops";
 import { authorised } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { mirrorToYourFrontDesk } from "@/lib/mirror";
@@ -63,6 +65,13 @@ export async function POST(request: Request) {
           { channexBookingId: (payload.booking_id ?? null) as string | null, otaReservationCode: (payload.ota_reservation_code ?? null) as string | null },
           { kind: "message", sender: "guest", content: text, sent_at: (payload.inserted_at ?? payload.sent_at ?? null) as string | null, message_id: id ?? null },
         );
+      }
+      // Answered now, not at the next two minute run. after() lets Channex have
+      // its 200 straight away while the reply is written and sent.
+      if (text && fromGuest) {
+        after(async () => {
+          if (await enabled("auto_reply_enabled")) await runJob("answer-messages", answerPendingMessages).catch(() => null);
+        });
       }
       return NextResponse.json({ ok: true, event, stored: "message" });
     }
