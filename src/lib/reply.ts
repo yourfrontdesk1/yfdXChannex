@@ -152,7 +152,9 @@ async function askHere(context: string, text: string, key: string): Promise<stri
   });
   if (!res.ok) return null;
   const payload = await res.json();
-  return (payload?.content?.[0]?.text as string | undefined) ?? null;
+  // The text block, not the first: a thinking block may come first.
+  const block = ((payload?.content ?? []) as { type?: string; text?: string }[]).find((b) => b.type === "text");
+  return block?.text ?? null;
 }
 
 export async function answerPendingMessages(): Promise<ReplyResult> {
