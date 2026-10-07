@@ -131,5 +131,24 @@ export async function auditListings(): Promise<{ checks: AuditCheck[]; failed: n
     add("every guest got their link", missing.length === 0, missing.length ? `${missing.length} without: ${missing.map((b) => `${b.guest_name} (${b.arrival_date})`).join(", ")}` : "all sent");
   }
 
+  // The reply engine needs the Anthropic account to have credit. On 7 October it
+  // ran out and every guest message went to a person; found only when a guest
+  // said thank you. A five token call says whether it can answer at all.
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (key) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 5, messages: [{ role: "user", content: "ok" }] }),
+    }).catch(() => null);
+    const text = res && !res.ok ? await res.text().catch(() => "") : "";
+    checks.push({
+      property: "All listings",
+      check: "AI replies working",
+      ok: !!res?.ok,
+      detail: res?.ok ? "Anthropic answering" : /credit balance is too low/i.test(text) ? "OUT OF CREDIT, top up at console.anthropic.com" : `Anthropic ${res?.status ?? "unreachable"}`,
+    });
+  }
+
   return { checks, failed: checks.filter((c) => !c.ok).length };
 }
