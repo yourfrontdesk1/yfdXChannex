@@ -88,7 +88,10 @@ export async function POST(request: Request) {
     await db()
       .from("inbound_bookings")
       .update({ link_sent_at: new Date().toISOString() })
-      .or(`ota_reservation_code.eq.${externalRef},ota_reservation_code.eq.${externalRef.replace(/^[A-Z]{3}-/, "")}`);
+      .or(`ota_reservation_code.eq.${externalRef},ota_reservation_code.eq.${externalRef.replace(/^[A-Z]{3}-/, "")}`)
+      // The first send is the link. A later reply must not move the time, or a
+      // reminder counts from the wrong day.
+      .is("link_sent_at", null);
   }
 
   // And on the guest portal itself, so its own "Link sent" badge is true. The
