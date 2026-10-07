@@ -92,10 +92,12 @@ async function askDownstream(
       body: JSON.stringify({ external_ref: ref, message: text, guest_name: booking.guest_name ?? null }),
     });
     if (!res.ok) return null;
-    const body = (await res.json()) as { reply?: string; escalate?: boolean };
+    const body = (await res.json()) as { reply?: string; escalate?: boolean; reason?: string; technical?: boolean };
     // An escalation is an answer: it means leave it for a person. Saying so
-    // rather than returning null stops the fallback quietly overriding it.
-    if (body.escalate) return "ESCALATE";
+    // rather than returning null stops the fallback quietly overriding it. The
+    // reason travels with it, so the email says why rather than blaming the
+    // assistant for a service that was down.
+    if (body.escalate) return `ESCALATE${body.reason ? `:${body.reason}` : ""}`;
     return body.reply?.trim() || null;
   } catch {
     return null;
@@ -212,7 +214,8 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
 
       // The model's own hand over signal.
       if (answer.trim().toUpperCase().startsWith("ESCALATE")) {
-        await escalate(threadId, bookingId, "the assistant would not answer it", message.body as string);
+        const why = answer.trim().slice("ESCALATE".length).replace(/^:/, "").trim();
+        await escalate(threadId, bookingId, why || "the assistant would not answer it", message.body as string);
         await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
         result.escalated++;
         continue;
