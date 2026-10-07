@@ -59,6 +59,41 @@ const HARD_ESCALATION = [
 const MIN_SECONDS_BETWEEN_REPLIES = 120;
 const MAX_REPLIES_PER_THREAD_PER_DAY = 8;
 
+/**
+ * Only thanks and pleasantries: short, no question, nothing asked for. Anything
+ * that might want an answer is left for the assistant.
+ */
+export function isPleasantry(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t || t.length > 160 || t.includes("?")) return false;
+  const kind = /\b(thank|thanks|thx|ty|cheers|great|perfect|lovely|brilliant|amazing|awesome|wonderful|fantastic|looking forward|see you|ok|okay|noted|received|got it|will do|sounds good)\b/;
+  const asks = /\b(can|could|would|when|where|how|what|which|is there|are there|do you|please|need|help|problem|issue|broken|late|early|parking|code|wifi|pay|refund|cancel|change|extra|bring|towel|bed)\b/;
+  return kind.test(t) && !asks.test(t);
+}
+
+/** A warm, short answer to a thank you, with the guest's first name and arrival day. No dashes. */
+export function pleasantryReply(firstName: string, arrival: string | null, seed: string): string {
+  const raw = firstName.trim().split(/\s+/)[0] ?? "";
+  const name = raw ? raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase() : "";
+  const day = arrival
+    ? new Date(`${arrival}T12:00:00Z`).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" })
+    : null;
+  const hi = name ? ` ${name}` : "";
+  const options = day
+    ? [
+        `You're very welcome${hi}, we're looking forward to welcoming you on ${day}. If you need anything before then, just message us here.`,
+        `Thank you${hi}, we can't wait to have you with us from ${day}. Any questions at all, just reply here.`,
+        `Lovely to hear${hi}! We're looking forward to your stay from ${day}, and we're here if you need anything.`,
+      ]
+    : [
+        `You're very welcome${hi}. If you need anything at all, just message us here.`,
+        `Thank you${hi}, we're here if you need anything.`,
+      ];
+  let h = 0;
+  for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return options[h % options.length];
+}
+
 async function escalate(threadId: string, bookingId: string | null, reason: string, message: string | null) {
   await db().from("escalations").insert({ thread_id: threadId, channex_booking_id: bookingId, reason, message });
   // Onto the Replies page in YourFrontDesk, and an email to Leon and Betty.
@@ -162,6 +197,31 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
       await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
       result.escalated++;
       continue;
+    }
+
+    // A thank you, or "looking forward to it", needs no model and never a
+    // person. On 7 October the AI was out of credit and a guest's thank you was
+    // emailed to Leon as needing him. Answered here, warmly, whatever the AI is doing.
+    if (isPleasantry(text)) {
+      const { data: stay } = await supabase
+        .from("inbound_bookings")
+        .select("guest_name, arrival_date, payload")
+        .eq("channex_booking_id", bookingId as string)
+        .order("received_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const reply = pleasantryReply(
+        ((stay?.payload as { customer?: { name?: string } } | null)?.customer?.name ?? String(stay?.guest_name ?? "").split(" ")[0]) || "",
+        (stay?.arrival_date as string | null) ?? null,
+        message.id as string,
+      );
+      const sentThanks = await sendGuestMessage({ threadId, bookingId, text: reply });
+      if (sentThanks.ok) {
+        await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
+        await mirrorToYourFrontDesk({ channexBookingId: bookingId }, { kind: "message", sender: "host", content: reply });
+        result.answered++;
+        continue;
+      }
     }
 
     // Nothing can run away with itself.
