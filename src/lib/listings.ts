@@ -363,11 +363,17 @@ export async function bookingComVerdict(channelId: string, since: string): Promi
     await sleep(4000);
     const events = await channexRequest<{ data?: { id: string; attributes: { name: string; inserted_at: string; payload?: { result?: string } } }[] }>(
       "GET",
-      `/channel_events?filter[channel_id]=${channelId}&pagination[limit]=50`,
+      `/channel_events?filter[channel_id]=${channelId}&pagination[limit]=50&order[inserted_at]=desc`,
     );
-    const syncs = (events.body?.data ?? []).filter((e) => e.attributes.name === "sync" && e.attributes.inserted_at >= since);
+    // Newest first, asked for explicitly: by default Channex returns the oldest,
+    // and a channel with more than fifty events never showed today's answer.
+    const syncs = (events.body?.data ?? [])
+      .filter((e) => e.attributes.name === "sync" && e.attributes.inserted_at >= since)
+      .sort((a, b) => a.attributes.inserted_at.localeCompare(b.attributes.inserted_at));
     if (!syncs.length) continue;
-    const latest = syncs[syncs.length - 1];
+    // Several syncs answer one push; any refusal among them is the answer.
+    const refused = syncs.find((e) => e.attributes.payload?.result !== "success");
+    const latest = refused ?? syncs[syncs.length - 1];
     if (latest.attributes.payload?.result === "success") return { ok: true, reason: "" };
     const logs = await channexRequest<{ data?: { logs?: { data?: { response?: string } }[] } }>("GET", `/channel_events/${latest.id}/logs`);
     const reasons = new Set<string>();
