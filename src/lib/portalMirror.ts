@@ -44,41 +44,43 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
   if (!target?.downstream_url || !target.downstream_secret) throw new Error("No YourFrontDesk endpoint configured");
   const endpoint = (target.downstream_url as string).replace(/channex-webhook\/?$/, "channex-conversation");
 
+  const batch = [];
   for (const b of bookings ?? []) {
     if (!b.external_ref) continue;
     out.considered++;
     const stay = `${b.property_id}|${b.check_in}|${b.check_out}`;
     if (/^LH/i.test(String(b.external_ref)) && channelStay.has(stay)) { out.duplicates++; continue; }
     const g = (b.guest ?? {}) as { first_name?: string; last_name?: string; email?: string; phone?: string };
-    const live = b.is_active && b.status !== "cancelled";
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-channex-webhook-secret": target.downstream_secret as string },
-      body: JSON.stringify({
-        kind: "booking",
-        external_ref: b.external_ref,
-        room: roomOf.get(b.property_id as string),
-        check_in: b.check_in,
-        check_out: b.check_out,
-        status: live ? "active" : "cancelled",
-        first_name: g.first_name ?? null,
-        last_name: g.last_name ?? null,
-        email: g.email ?? null,
-        phone: g.phone ?? null,
-        guests: b.num_guests ?? null,
-        amount: Number(b.balance_amount ?? 0) + Number(b.deposit_amount ?? 0) || null,
-        currency: b.currency ?? "GBP",
-        source: b.channel ?? b.booking_source ?? null,
-        portal_url: b.token ? `https://guestportal.victorysuites.gi/guest/${b.token}` : null,
-        payment_link: b.payment_link ?? null,
-        link_sent_at: b.portal_link_sent_at ?? null,
-        portal_booking_id: b.id,
-      }),
-    }).catch((e) => ({ ok: false, text: async () => String(e) }) as unknown as Response);
-    const body = await res.text();
-    if (!res.ok) { out.errors.push(`${b.external_ref}: ${body.slice(0, 120)}`); continue; }
-    if (body.includes('"inserted":true')) out.inserted++;
-    else out.existed++;
+    const isLive = b.is_active && b.status !== "cancelled";
+    batch.push({
+      external_ref: b.external_ref,
+      room: roomOf.get(b.property_id as string),
+      check_in: b.check_in,
+      check_out: b.check_out,
+      status: isLive ? "active" : "cancelled",
+      first_name: g.first_name ?? null,
+      last_name: g.last_name ?? null,
+      email: g.email ?? null,
+      phone: g.phone ?? null,
+      guests: b.num_guests ?? null,
+      amount: Number(b.balance_amount ?? 0) + Number(b.deposit_amount ?? 0) || null,
+      currency: b.currency ?? "GBP",
+      source: b.channel ?? b.booking_source ?? null,
+      portal_url: b.token ? `https://guestportal.victorysuites.gi/guest/${b.token}` : null,
+      payment_link: b.payment_link ?? null,
+      link_sent_at: b.portal_link_sent_at ?? null,
+      portal_booking_id: b.id,
+    });
   }
+  // One call for the lot: a call per booking ran past the time limit.
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-channex-webhook-secret": target.downstream_secret as string },
+    body: JSON.stringify({ kind: "bookings", external_ref: "batch", bookings: batch }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { inserted?: number; existed?: number; error?: string };
+  if (!res.ok) out.errors.push(body.error ?? `YourFrontDesk ${res.status}`);
+  out.inserted = body.inserted ?? 0;
+  out.existed = body.existed ?? 0;
   return out;
 }
