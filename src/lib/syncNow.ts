@@ -5,6 +5,7 @@ import { syncAvailability } from "./parkside";
 import { priceProperty } from "./pricing";
 import { fullSync } from "./fullsync";
 import { bookingComVerdict } from "./listings";
+import { mirrorPortalBookings } from "./portalMirror";
 
 /**
  * What the Sync button does, all of it, in order, and proved at the end.
@@ -38,6 +39,13 @@ export async function syncNow(propertyId: string): Promise<{ ok: boolean; steps:
     add("Bookings", true, feed.length ? `${added} booking change${added === 1 ? "" : "s"} pulled from Channex that had not arrived` : "No missed bookings, all already here");
   } catch (e) {
     add("Bookings", false, e instanceof Error ? e.message : String(e));
+  }
+
+  try {
+    const m = await mirrorPortalBookings();
+    add("Other channels", m.errors.length === 0, `${m.inserted} new booking${m.inserted === 1 ? "" : "s"} from other channels filed in YourFrontDesk, ${m.duplicates} duplicate${m.duplicates === 1 ? "" : "s"} skipped${m.errors.length ? `; ${m.errors.length} failed: ${m.errors[0]}` : ""}`);
+  } catch (e) {
+    add("Other channels", false, e instanceof Error ? e.message : String(e));
   }
 
   try {

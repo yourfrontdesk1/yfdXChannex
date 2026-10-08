@@ -69,6 +69,7 @@ const EXPECTED_GAP_MINUTES: Record<string, number> = {
   audit: 150,
   // Daily at 9 UTC, 10 or 11 in Gibraltar.
   reminders: 1560,
+  "portal-mirror": 60,
 };
 
 /**
