@@ -150,18 +150,25 @@ export async function syncAvailability(
   );
 
   // A night is held from check in up to, but not including, check out.
-  const soldOn = new Map<string, Record<string, number>>();
+  // Flats taken per night, not bookings. The same stay can sit in the portal
+  // twice (a Booking.com copy and a Little Hotelier "Direct" copy were found for
+  // every Channex booking on 8 October), and counting bookings made one guest
+  // look like two flats, closing the other studio on Booking.com while it was free.
+  const takenOn = new Map<string, Record<string, Set<string>>>();
   for (const b of held) {
     const type = typeOfApartment.get(b.property_id as string);
     if (!type) continue;
     for (let d = new Date(`${b.check_in}T00:00:00Z`); iso(d) < b.check_out; d = addDays(d, 1)) {
       const key = iso(d);
       if (key < from || key > to) continue;
-      if (!soldOn.has(key)) soldOn.set(key, {});
-      const night = soldOn.get(key)!;
-      night[type] = (night[type] ?? 0) + 1;
+      if (!takenOn.has(key)) takenOn.set(key, {});
+      const night = takenOn.get(key)!;
+      (night[type] ??= new Set()).add(b.property_id as string);
     }
   }
+  const soldOn = new Map<string, Record<string, number>>(
+    [...takenOn.entries()].map(([k, v]) => [k, Object.fromEntries(Object.entries(v).map(([t, set]) => [t, set.size]))]),
+  );
 
   const { data: roomTypes, error: rtError } = await hub
     .from("room_types")
