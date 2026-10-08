@@ -25,7 +25,7 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
   const today = new Date().toISOString().slice(0, 10);
   const { data: bookings, error } = await portal
     .from("bookings")
-    .select("id, external_ref, property_id, check_in, check_out, status, is_active, created_at, ota_created_at, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
+    .select("id, external_ref, property_id, check_in, check_out, status, is_active, ota_status, created_at, ota_created_at, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
     .in("property_id", [...roomOf.keys()])
     .gte("check_out", today);
   if (error) throw new Error(`Portal bookings: ${error.message}`);
@@ -51,7 +51,10 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
     const stay = `${b.property_id}|${b.check_in}|${b.check_out}`;
     if (/^LH/i.test(String(b.external_ref)) && channelStay.has(stay)) { out.duplicates++; continue; }
     const g = (b.guest ?? {}) as { first_name?: string; last_name?: string; email?: string; phone?: string };
-    const isLive = b.is_active && b.status !== "cancelled";
+    // Cancelled on the channel counts as cancelled here, even where the portal
+    // never heard: lynsey corrie was cancelled on Booking.com in June and still
+    // sat active in the portal in October.
+    const isLive = b.is_active && b.status !== "cancelled" && String(b.ota_status ?? "").toLowerCase() !== "cancelled";
     batch.push({
       external_ref: b.external_ref,
       room: roomOf.get(b.property_id as string),
