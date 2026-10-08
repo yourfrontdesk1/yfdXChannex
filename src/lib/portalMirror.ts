@@ -25,7 +25,7 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
   const today = new Date().toISOString().slice(0, 10);
   const { data: bookings, error } = await portal
     .from("bookings")
-    .select("id, external_ref, property_id, check_in, check_out, status, is_active, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
+    .select("id, external_ref, property_id, check_in, check_out, status, is_active, created_at, ota_created_at, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
     .in("property_id", [...roomOf.keys()])
     .gte("check_out", today);
   if (error) throw new Error(`Portal bookings: ${error.message}`);
@@ -70,6 +70,8 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
       payment_link: b.payment_link ?? null,
       link_sent_at: b.portal_link_sent_at ?? null,
       portal_booking_id: b.id,
+      // When it was really booked, so the hourly digest does not call an old booking new.
+      created_at: b.ota_created_at ?? b.created_at ?? null,
     });
   }
   // One call for the lot: a call per booking ran past the time limit.
