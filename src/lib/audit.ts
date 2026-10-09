@@ -131,6 +131,31 @@ export async function auditListings(): Promise<{ checks: AuditCheck[]; failed: n
     add("every guest got their link", missing.length === 0, missing.length ? `${missing.length} without: ${missing.map((b) => `${b.guest_name} (${b.arrival_date})`).join(", ")}` : "all sent");
   }
 
+  // Every guest answered. A message nobody has processed after ten minutes is a
+  // guest waiting on nothing; a hand over left for two hours is a guest waiting
+  // on a person. Leon, 9 October: "why are we not replying to all guest messages".
+  const tenMin = new Date(Date.now() - 10 * 60000).toISOString();
+  const twoHours = new Date(Date.now() - 2 * 3600000).toISOString();
+  const { data: waiting } = await hub
+    .from("guest_messages")
+    .select("id, body")
+    .eq("direction", "inbound")
+    .is("forwarded_at", null)
+    .lt("received_at", tenMin);
+  checks.push({
+    property: "All listings",
+    check: "every guest message processed",
+    ok: !(waiting ?? []).length,
+    detail: (waiting ?? []).length ? `${waiting!.length} waiting over 10 minutes: "${String(waiting![0].body ?? "").slice(0, 60)}"` : "none waiting",
+  });
+  const { data: handed } = await hub.from("escalations").select("id, message").is("resolved_at", null).lt("raised_at", twoHours);
+  checks.push({
+    property: "All listings",
+    check: "no guest left with a person",
+    ok: !(handed ?? []).length,
+    detail: (handed ?? []).length ? `${handed!.length} handed over more than 2 hours ago and not resolved: "${String(handed![0].message ?? "").slice(0, 60)}". Answer it on the Replies page.` : "none open",
+  });
+
   // The reply engine needs the Anthropic account to have credit. On 7 October it
   // ran out and every guest message went to a person; found only when a guest
   // said thank you. A five token call says whether it can answer at all.
