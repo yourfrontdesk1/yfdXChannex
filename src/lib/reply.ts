@@ -50,7 +50,9 @@ If the message is a complaint, a refund or compensation request, a cancellation 
 
 /** Words that go to a person whatever the model thinks. Cheap, and it fires first. */
 const HARD_ESCALATION = [
-  "refund", "compensation", "complain", "complaint", "cancel my", "cancellation", "chargeback",
+  // "cancellation" alone is not here: "is the cancellation free" is a policy
+  // question with an answer, and catching it left Bindu Byrne unanswered.
+  "refund", "compensation", "complain", "complaint", "cancel my", "cancel the booking", "cancel our", "want to cancel", "need to cancel", "chargeback",
   "dispute", "lawyer", "solicitor", "legal", "police", "ambulance", "hospital", "injur", "unsafe",
   "bed bug", "flood", "fire", "broken into", "stolen", "theft", "disgust", "unacceptable",
 ];
@@ -65,9 +67,12 @@ const MAX_REPLIES_PER_THREAD_PER_DAY = 8;
  */
 export function isPleasantry(text: string): boolean {
   const t = text.trim().toLowerCase();
-  if (!t || t.length > 160 || t.includes("?")) return false;
+  if (!t || t.length > 90 || t.includes("?")) return false;
   const kind = /\b(thank|thanks|thx|ty|cheers|great|perfect|lovely|brilliant|amazing|awesome|wonderful|fantastic|looking forward|see you|ok|okay|noted|received|got it|will do|sounds good)\b/;
-  const asks = /\b(can|could|would|when|where|how|what|which|is there|are there|do you|please|need|help|problem|issue|broken|late|early|parking|code|wifi|pay|refund|cancel|change|extra|bring|towel|bed)\b/;
+  // Anything that asks for, prefers or mentions the stay itself goes to the
+  // assistant. "Higher up apartment with runway view if possible. Thanks" was
+  // answered "You're very welcome" on 9 October because none of these were here.
+  const asks = /\b(can|could|would|when|where|how|what|which|is there|are there|do you|please|need|help|problem|issue|broken|late|early|parking|code|wifi|pay|refund|cancel|change|extra|bring|towel|bed|room|apartment|flat|studio|floor|higher|lower|view|quiet|balcony|shower|bath|invoice|receipt|request|prefer|preference|possible|if possible|like to|would like|want|arriv|check|time|key|door|airport|taxi|bag|luggage|pool|gym|pet|dog|cot|crib|baby)\b/;
   return kind.test(t) && !asks.test(t);
 }
 
