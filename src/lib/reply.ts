@@ -77,14 +77,26 @@ export function isPleasantry(text: string): boolean {
 }
 
 /** A warm, short answer to a thank you, with the guest's first name and arrival day. No dashes. */
-export function pleasantryReply(firstName: string, arrival: string | null, seed: string): string {
+export function pleasantryReply(firstName: string, arrival: string | null, seed: string, departure: string | null = null): string {
   const raw = firstName.trim().split(/\s+/)[0] ?? "";
   const name = raw ? raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase() : "";
   const day = arrival
     ? new Date(`${arrival}T12:00:00Z`).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" })
     : null;
   const hi = name ? ` ${name}` : "";
-  const options = day
+  // Ivelina, in her flat on 20 October, was told "we're looking forward to
+  // welcoming you on Tuesday 20 October". Once they have arrived it says so.
+  const today = new Date().toISOString().slice(0, 10);
+  const here = arrival && arrival <= today && (!departure || departure >= today);
+  const gone = departure && departure < today;
+  const options = gone
+    ? [`Thank you so much${hi}, it was a pleasure having you with us.`]
+    : here
+    ? [
+        `You're very welcome${hi}, enjoy the rest of your stay. If you need anything at all, just message us here.`,
+        `Glad to hear it${hi}! Enjoy your stay, and we're here if you need anything.`,
+      ]
+    : day
     ? [
         `You're very welcome${hi}, we're looking forward to welcoming you on ${day}. If you need anything before then, just message us here.`,
         `Thank you${hi}, we can't wait to have you with us from ${day}. Any questions at all, just reply here.`,
@@ -97,6 +109,26 @@ export function pleasantryReply(firstName: string, arrival: string | null, seed:
   let h = 0;
   for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return options[h % options.length];
+}
+
+/**
+ * The conversation so far, from Channex itself. The hub's own table misses the
+ * thank yous and anything a person typed, so it is not the record. Without this
+ * the assistant answered "connected" with "How can I help with your upcoming
+ * stay?" to a guest already in her flat, on 20 October.
+ */
+async function threadHistory(threadId: string): Promise<{ from: "guest" | "us"; text: string; at: string }[]> {
+  const res = await channexRequest<{ data?: { attributes?: { sender?: string; message?: string; inserted_at?: string } }[] }>(
+    "GET",
+    `/message_threads/${threadId}/messages?pagination[limit]=16&order[inserted_at]=desc`,
+    undefined,
+    { retries: 1 },
+  );
+  return (res.body?.data ?? [])
+    .map((m) => m.attributes ?? {})
+    .filter((a) => a.message)
+    .map((a) => ({ from: a.sender === "guest" ? "guest" as const : "us" as const, text: String(a.message).slice(0, 1200), at: a.inserted_at ?? "" }))
+    .reverse();
 }
 
 async function escalate(threadId: string, bookingId: string | null, reason: string, message: string | null) {
@@ -120,6 +152,7 @@ export type ReplyResult = {
 async function askDownstream(
   booking: { ota_reservation_code?: string | null; guest_name?: string | null },
   text: string,
+  extra: { history?: { from: string; text: string; at: string }[]; kind?: "pleasantry" } = {},
 ): Promise<string | null> {
   const base = process.env.DOWNSTREAM_REPLY_URL;
   const secret = process.env.DOWNSTREAM_SECRET;
@@ -129,7 +162,7 @@ async function askDownstream(
     const res = await fetch(base, {
       method: "POST",
       headers: { "content-type": "application/json", "x-channex-webhook-secret": secret },
-      body: JSON.stringify({ external_ref: ref, message: text, guest_name: booking.guest_name ?? null }),
+      body: JSON.stringify({ external_ref: ref, message: text, guest_name: booking.guest_name ?? null, history: extra.history ?? [], kind: extra.kind ?? null }),
     });
     if (!res.ok) return null;
     const body = (await res.json()) as { reply?: string; escalate?: boolean; reason?: string; technical?: boolean };
@@ -197,13 +230,21 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
     const text = (message.body as string) ?? "";
 
     // A thread already handed to a person stays with them.
-    const { data: openEscalation } = await supabase
+    const { data: openEscalations } = await supabase
       .from("escalations")
       .select("id")
       .eq("thread_id", threadId)
       .is("resolved_at", null)
-      .maybeSingle();
-    if (openEscalation) {
+      .limit(1);
+    if (openEscalations?.length) {
+      // Their next message goes to the same people, on the Replies page and by
+      // email. It used to be marked done and dropped: Yasser Alhoussainy asked
+      // for an invoice on 18 October and nobody ever saw it.
+      await mirrorToYourFrontDesk({ channexBookingId: bookingId }, {
+        kind: "escalation",
+        guest_message: text,
+        reason: "they wrote again while their earlier message is still waiting for you",
+      });
       await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
       result.escalated++;
       continue;
@@ -229,11 +270,27 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
         .order("received_at", { ascending: false })
         .limit(1)
         .maybeSingle();
-      const reply = pleasantryReply(
-        ((stay?.payload as { customer?: { name?: string } } | null)?.customer?.name ?? String(stay?.guest_name ?? "").split(" ")[0]) || "",
-        (stay?.arrival_date as string | null) ?? null,
-        message.id as string,
-      );
+      // The assistant writes it, so "the trip is for my 60th birthday" gets a
+      // happy birthday and not the same line twice. The fixed lines are only the
+      // fallback, and a thank you is never handed to a person.
+      const { data: refRow } = await supabase
+        .from("inbound_bookings")
+        .select("ota_reservation_code, guest_name, departure_date")
+        .eq("channex_booking_id", bookingId as string)
+        .order("received_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const written = refRow
+        ? await askDownstream(refRow, text, { history: await threadHistory(threadId).catch(() => []), kind: "pleasantry" })
+        : null;
+      const reply = written && !written.trim().toUpperCase().startsWith("ESCALATE")
+        ? written.trim()
+        : pleasantryReply(
+          ((stay?.payload as { customer?: { name?: string } } | null)?.customer?.name ?? String(stay?.guest_name ?? "").split(" ")[0]) || "",
+          (stay?.arrival_date as string | null) ?? null,
+          message.id as string,
+          (refRow?.departure_date as string | null) ?? null,
+        );
       const sentThanks = await sendGuestMessage({ threadId, bookingId, text: reply });
       if (sentThanks.ok) {
         await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
@@ -284,7 +341,8 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
       // door code rules, its WiFi, the pool pass, the bin store. This service
       // keeps a brain of its own only as a fallback, for the case where the
       // downstream is unreachable and silence would be worse than a general answer.
-      const answer = await askDownstream(booking, text) ?? await askHere(context, text, key);
+      const history = await threadHistory(threadId).catch(() => []);
+      const answer = await askDownstream(booking, text, { history }) ?? await askHere(context, text, key);
       if (!answer) {
         result.failed++;
         result.errors.push("Neither YourFrontDesk nor the fallback produced an answer");
