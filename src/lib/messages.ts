@@ -22,6 +22,8 @@ export async function sendGuestMessage(opts: {
   text: string;
   propertyId?: string | null;
 }): Promise<{ ok: boolean; threadId: string | null; error: string | null }> {
+  // TEMP rehearsal stub: when set, no message leaves to Channex. Reverted after the run.
+  if (process.env.STUB_CHANNEX_SEND) return { ok: true, threadId: opts.threadId ?? null, error: null };
   const body = { message: { message: opts.text } };
   const path = opts.threadId
     ? `/message_threads/${opts.threadId}/messages`
