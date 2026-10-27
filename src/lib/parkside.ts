@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { db } from "./db";
 
 /**
@@ -72,6 +72,8 @@ export type AvailabilitySyncResult = {
   rows_changed: number;
   rows_already_correct: number;
   error: string | null;
+  /** Where the occupancy came from this run: the portal endpoint, or the direct fallback. */
+  source: "occupancy" | "direct";
 };
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
@@ -82,6 +84,123 @@ function portalClient() {
   const key = process.env.PORTAL_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error("PORTAL_SUPABASE_URL and PORTAL_SERVICE_ROLE_KEY are not set");
   return createClient(url, key, { auth: { persistSession: false } });
+}
+
+type OccupancyNight = { date?: string; occupied?: string[]; detail?: Record<string, string> };
+type OccupancyResponse = { from?: string; to?: string; nights?: OccupancyNight[] };
+
+/**
+ * Occupied apartments per night from the portal's occupancy endpoint (contract
+ * v1.20), classified into this property's room types by `typeOfRoom`.
+ *
+ * This is the closures-aware source of truth. The endpoint counts every
+ * apartment the portal cannot sell on a night from EVERY source: guests, owner
+ * stays, blocks, maintenance, holds, the hardcoded units-not-in-use ranges and
+ * `out_of_service_from` closures. The direct bookings read this replaces saw
+ * only the bookings table, so a block or an out-of-service flat would be
+ * undercounted and reopened on Booking.com.
+ *
+ * The endpoint returns nights for the half-open range [from, to), so it is asked
+ * for one day past the last sync date to make that last date a night too. It is
+ * called the same way the booking forwarding does: PORTAL_API_URL + PORTAL_API_KEY
+ * as a bearer, plus the PORTAL_PREVIEW_BYPASS header on a protected preview.
+ *
+ * Returns null on any non-2xx, network error, or missing config, so the caller
+ * falls back to the direct read and nothing breaks.
+ */
+async function occupancyFromPortal(
+  from: string,
+  to: string,
+  typeOfRoom: Record<string, string>,
+): Promise<Map<string, Record<string, number>> | null> {
+  const base = process.env.PORTAL_API_URL?.replace(/\/$/, "");
+  const key = process.env.PORTAL_API_KEY;
+  if (!base || !key) return null;
+  const previewBypass = process.env.PORTAL_PREVIEW_BYPASS;
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${key}`,
+    ...(previewBypass ? { "x-vercel-protection-bypass": previewBypass } : {}),
+  };
+  // [from, to): ask one day past the last sync date so that date is a night.
+  const until = iso(addDays(new Date(`${to}T00:00:00Z`), 1));
+  const url = `${base}/api/external/occupancy?from=${from}&to=${until}`;
+
+  let json: OccupancyResponse;
+  try {
+    const res = await fetch(url, { headers });
+    if (!res.ok) return null;
+    json = (await res.json()) as OccupancyResponse;
+  } catch {
+    return null;
+  }
+  if (!json || !Array.isArray(json.nights)) return null;
+
+  // Flats taken per night, not bookings. `occupied` is already the distinct set
+  // of room numbers the portal holds for that night, so the per-type count is
+  // just how many of this property's rooms appear in it. Apartments this
+  // property does not sell are not in `typeOfRoom` and are skipped.
+  const soldOn = new Map<string, Record<string, number>>();
+  for (const night of json.nights) {
+    const date = night.date;
+    if (!date || date < from || date > to) continue;
+    const rec: Record<string, number> = {};
+    for (const room of night.occupied ?? []) {
+      const type = typeOfRoom[room];
+      if (!type) continue;
+      rec[type] = (rec[type] ?? 0) + 1;
+    }
+    soldOn.set(date, rec);
+  }
+  return soldOn;
+}
+
+/**
+ * The interim fallback: occupied apartments per type per night read straight
+ * from the portal `bookings` table, used only when the occupancy endpoint is
+ * unreachable. This is the behaviour before contract v1.20, kept verbatim so a
+ * fallback run matches exactly what the old sync produced. It sees bookings
+ * only, NOT blocks or closures.
+ */
+async function soldFromDirectRead(
+  portal: SupabaseClient,
+  apartmentIds: string[],
+  typeOfApartment: Map<string, string>,
+  from: string,
+  to: string,
+): Promise<{ soldOn: Map<string, Record<string, number>>; held: number }> {
+  const { data: bookings, error: bookingError } = await portal
+    .from("bookings")
+    .select("property_id, check_in, check_out, status, is_active, no_show")
+    .in("property_id", apartmentIds)
+    .gte("check_out", from)
+    .lte("check_in", to);
+  if (bookingError) throw new Error(`Portal bookings: ${bookingError.message}`);
+
+  const held = (bookings ?? []).filter(
+    (b) => b.is_active && b.status !== "cancelled" && !b.no_show && b.check_in && b.check_out,
+  );
+
+  // A night is held from check in up to, but not including, check out.
+  // The same stay can sit in the portal twice (a Booking.com copy and a Little
+  // Hotelier "Direct" copy were found for every Channex booking on 8 October),
+  // and counting bookings made one guest look like two flats, closing the other
+  // studio on Booking.com while it was free, so flats are counted, not bookings.
+  const takenOn = new Map<string, Record<string, Set<string>>>();
+  for (const b of held) {
+    const type = typeOfApartment.get(b.property_id as string);
+    if (!type) continue;
+    for (let d = new Date(`${b.check_in}T00:00:00Z`); iso(d) < b.check_out; d = addDays(d, 1)) {
+      const key = iso(d);
+      if (key < from || key > to) continue;
+      if (!takenOn.has(key)) takenOn.set(key, {});
+      const night = takenOn.get(key)!;
+      (night[type] ??= new Set()).add(b.property_id as string);
+    }
+  }
+  const soldOn = new Map<string, Record<string, number>>(
+    [...takenOn.entries()].map(([k, v]) => [k, Object.fromEntries(Object.entries(v).map(([t, set]) => [t, set.size]))]),
+  );
+  return { soldOn, held: held.length };
 }
 
 /** Every active property with apartments declared, one after another, so one failing does not hide the others. */
@@ -137,44 +256,87 @@ export async function syncAvailability(
     unitsOfType[type] = (unitsOfType[type] ?? 0) + 1;
   }
 
-  const { data: bookings, error: bookingError } = await portal
-    .from("bookings")
-    .select("property_id, check_in, check_out, status, is_active, no_show")
-    .in("property_id", apartments.map((a) => a.id))
-    .gte("check_out", from)
-    .lte("check_in", to);
-  if (bookingError) throw new Error(`Portal bookings: ${bookingError.message}`);
-
-  const held = (bookings ?? []).filter(
-    (b) => b.is_active && b.status !== "cancelled" && !b.no_show && b.check_in && b.check_out,
-  );
-
-  // A night is held from check in up to, but not including, check out.
-  // Flats taken per night, not bookings. The same stay can sit in the portal
-  // twice (a Booking.com copy and a Little Hotelier "Direct" copy were found for
-  // every Channex booking on 8 October), and counting bookings made one guest
-  // look like two flats, closing the other studio on Booking.com while it was free.
-  const takenOn = new Map<string, Record<string, Set<string>>>();
-  for (const b of held) {
-    const type = typeOfApartment.get(b.property_id as string);
-    if (!type) continue;
-    for (let d = new Date(`${b.check_in}T00:00:00Z`); iso(d) < b.check_out; d = addDays(d, 1)) {
-      const key = iso(d);
-      if (key < from || key > to) continue;
-      if (!takenOn.has(key)) takenOn.set(key, {});
-      const night = takenOn.get(key)!;
-      (night[type] ??= new Set()).add(b.property_id as string);
-    }
+  // Availability follows the portal's occupancy (contract v1.20). The endpoint
+  // is closures-aware: it counts guests, owner stays, blocks, maintenance,
+  // holds, the units-not-in-use ranges and out_of_service_from closures, which
+  // the direct bookings table read below misses. If the endpoint is unreachable
+  // we fall back to that direct read so a sync never fails for want of it.
+  let source: "occupancy" | "direct" = "occupancy";
+  let soldOn = await occupancyFromPortal(from, to, typeOfRoom);
+  let held = 0;
+  if (!soldOn) {
+    source = "direct";
+    const direct = await soldFromDirectRead(portal, apartments.map((a) => a.id as string), typeOfApartment, from, to);
+    soldOn = direct.soldOn;
+    held = direct.held;
+  } else {
+    // A diagnostic count for the logs so the occupancy path is not silently
+    // zero: the occupied apartment-nights this property holds across the window.
+    for (const rec of soldOn.values()) held += Object.values(rec).reduce((a, b) => a + b, 0);
   }
-  const soldOn = new Map<string, Record<string, number>>(
-    [...takenOn.entries()].map(([k, v]) => [k, Object.fromEntries(Object.entries(v).map(([t, set]) => [t, set.size]))]),
-  );
 
   const { data: roomTypes, error: rtError } = await hub
     .from("room_types")
-    .select("id, name")
+    .select("id, name, channex_room_type_id")
     .eq("property_id", propertyId);
   if (rtError) throw new Error(`Hub room types: ${rtError.message}`);
+
+  // Guard against the multi-room forwarding gap. The portal holds only the rooms
+  // it was sent, so a group booking whose extra rooms never reached it would be
+  // undercounted above and this recalculation would reopen those rooms and let
+  // the channel resell them. The hub knows the true room count from the Channex
+  // revision it stored, so sold per type per night is the MAX of the portal
+  // count and the hub's own count. Close only: it can lower availability, never
+  // raise it, and once every room is forwarded the two agree and it is a no-op.
+  const channexToName = new Map<string, string>();
+  for (const rt of roomTypes ?? []) {
+    if (rt.channex_room_type_id) channexToName.set(rt.channex_room_type_id as string, rt.name as string);
+  }
+  // Paged: PostgREST caps a select at 1000 rows and the main listing holds far
+  // more revisions than that, which would silently weaken the guard.
+  const revisions: Record<string, unknown>[] = [];
+  const REV_PAGE = 1000;
+  for (let offset = 0; ; offset += REV_PAGE) {
+    const { data: page, error: revErr } = await hub
+      .from("inbound_bookings")
+      .select("channex_booking_id, revision_id, status, payload")
+      .eq("property_id", propertyId)
+      .lte("arrival_date", to)
+      .gte("departure_date", from)
+      .order("received_at", { ascending: false })
+      .range(offset, offset + REV_PAGE - 1);
+    if (revErr) throw new Error(`Hub inbound_bookings: ${revErr.message}`);
+    for (const r of page ?? []) revisions.push(r);
+    if (!page || page.length < REV_PAGE) break;
+  }
+  // One booking has many revisions; the newest is the current state.
+  const latestByBooking = new Map<string, { status: string | null; payload: Record<string, unknown> | null }>();
+  for (const r of revisions) {
+    const key = (r.channex_booking_id as string | null) ?? (r.revision_id as string);
+    if (!latestByBooking.has(key)) {
+      latestByBooking.set(key, { status: r.status as string | null, payload: r.payload as Record<string, unknown> | null });
+    }
+  }
+  const hubSoldOn = new Map<string, Record<string, number>>();
+  for (const b of latestByBooking.values()) {
+    if (String(b.status ?? "").toLowerCase() === "cancelled") continue;
+    const p = (b.payload ?? {}) as { rooms?: Record<string, unknown>[]; arrival_date?: string; departure_date?: string };
+    const rooms = Array.isArray(p.rooms) ? p.rooms : [];
+    for (const room of rooms) {
+      const typeName = channexToName.get(String(room.room_type_id ?? ""));
+      if (!typeName) continue;
+      const ci = String(room.checkin_date ?? p.arrival_date ?? "");
+      const co = String(room.checkout_date ?? p.departure_date ?? "");
+      if (!ci || !co) continue;
+      for (let d = new Date(`${ci}T00:00:00Z`); iso(d) < co; d = addDays(d, 1)) {
+        const key = iso(d);
+        if (key < from || key > to) continue;
+        if (!hubSoldOn.has(key)) hubSoldOn.set(key, {});
+        const night = hubSoldOn.get(key)!;
+        night[typeName] = (night[typeName] ?? 0) + 1;
+      }
+    }
+  }
 
   // PostgREST caps a select at 1000 rows. Four room types over 500 days is two
   // thousand, so an unpaged read silently reports half the grid as changed and
@@ -205,7 +367,9 @@ export async function syncAvailability(
     if (!roomsByType[rt.name as string]) throw new Error(`No apartments are declared for room type "${rt.name}"`);
     const total = unitsOfType[rt.name as string] ?? 0;
     for (const date of dates) {
-      const sold = soldOn.get(date)?.[rt.name as string] ?? 0;
+      const portalSold = soldOn.get(date)?.[rt.name as string] ?? 0;
+      const hubSold = hubSoldOn.get(date)?.[rt.name as string] ?? 0;
+      const sold = Math.max(portalSold, hubSold);
       const availability = Math.max(0, total - sold);
       if (existing.get(`${rt.id}|${date}`) === availability) { alreadyCorrect++; continue; }
       rows.push({ property_id: propertyId, room_type_id: rt.id as string, rate_plan_id: null, date, availability });
@@ -223,12 +387,13 @@ export async function syncAvailability(
     property_id: propertyId,
     apartments: apartments.length,
     units: unitsOfType,
-    bookings_held: held.length,
+    bookings_held: held,
     from,
     to,
     rows_changed: rows.length,
     rows_already_correct: alreadyCorrect,
     error: null,
+    source,
   };
 }
 
