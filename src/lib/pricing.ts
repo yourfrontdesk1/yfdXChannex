@@ -3,6 +3,39 @@ import { db } from "./db";
 import { roomsByProperty } from "./parkside";
 
 /**
+ * Prices ready to go live? A listing must never push PLACEHOLDER prices to
+ * Booking.com: a fence left at floor = base = ceiling, or switched off, means
+ * the real rate was never set, and a flat or zero price would sell the room for
+ * whatever that number is. Only room types that actually map to Booking.com are
+ * checked (an unmapped type, e.g. 11.01 before it has its own listing, never
+ * reaches a channel, so its placeholder does not matter). goLive and the
+ * channel full_sync call this and refuse when it is not ready.
+ */
+export async function pricesReady(propertyId: string): Promise<{ ready: boolean; reason: string }> {
+  const hub = db();
+  const { data: rts } = await hub
+    .from("room_types")
+    .select("id, name, ota_room_type_code")
+    .eq("property_id", propertyId);
+  const mapped = (rts ?? []).filter((r) => r.ota_room_type_code);
+  if (mapped.length === 0) return { ready: true, reason: "" };
+  const { data: rules } = await hub
+    .from("pricing_rules")
+    .select("room_type_id, floor_rate, base_rate, ceiling_rate, is_active")
+    .in("room_type_id", mapped.map((r) => r.id as string));
+  const byRt = new Map((rules ?? []).map((r) => [r.room_type_id as string, r]));
+  const bad: string[] = [];
+  for (const rt of mapped) {
+    const r = byRt.get(rt.id as string);
+    if (!r) { bad.push(`${rt.name}: no price fence`); continue; }
+    if (!r.is_active) { bad.push(`${rt.name}: fence switched off`); continue; }
+    const floor = Number(r.floor_rate), base = Number(r.base_rate), ceiling = Number(r.ceiling_rate);
+    if (floor === base && base === ceiling) { bad.push(`${rt.name}: placeholder (floor = base = ceiling = ${floor})`); continue; }
+  }
+  return bad.length ? { ready: false, reason: `prices not set: ${bad.join("; ")}` } : { ready: true, reason: "" };
+}
+
+/**
  * What a night is worth.
  *
  * These fourteen apartments have never really been priced. Looking at what they

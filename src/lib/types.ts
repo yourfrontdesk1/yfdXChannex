@@ -20,6 +20,7 @@ export type Property = {
    * live forwardToYourFrontDesk / forwardToGuestPortal path.
    */
   use_direct_forward?: boolean | null;
+  pull_window_until?: string | null;
   is_active: boolean;
 };
 

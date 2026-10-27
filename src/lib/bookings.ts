@@ -869,6 +869,13 @@ async function forwardDirect(property: Property, revision: BookingRevision): Pro
 
   const filedStatus = status === "modified" ? "modified" : "new";
   const unitsBooked = rooms.length;
+  // pulled: a reservation brought in by connect-day "Pull Future Reservations",
+  // not a live booking. It is stamped ONLY while the property's pull window is
+  // open (set right before the pull, cleared after), never on live new/modified
+  // reservations. The portal keeps its held amounts and flat, and YourFrontDesk
+  // files it with no second guest link or alert. Sending it on a live booking
+  // would make a real price change be ignored, so the window is the only source.
+  const pulled = property.pull_window_until != null && new Date(property.pull_window_until).getTime() > Date.now();
   const currency = revision.currency ?? "GBP";
   const pc = String(revision.payment_collect ?? "").toLowerCase();
   // Only channels known to collect the FULL stay up front may mark the share
@@ -929,6 +936,7 @@ async function forwardDirect(property: Property, revision: BookingRevision): Pro
       reassign,
       candidates,
       no_thread: noThread,
+      ...(pulled ? { pulled: true } : {}),
     };
 
     let portalRoom = storedApt;
@@ -986,6 +994,7 @@ async function forwardDirect(property: Property, revision: BookingRevision): Pro
       source: revision.ota_name ?? null,
       ota_paid_amount: otaPaid,
       no_thread: noThread,
+      ...(pulled ? { pulled: true } : {}),
     });
   }
 

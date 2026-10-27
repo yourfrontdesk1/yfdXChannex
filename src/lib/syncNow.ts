@@ -2,7 +2,7 @@ import { db } from "./db";
 import { channexRequest } from "./channex";
 import { fetchFeed, ingestRevision } from "./bookings";
 import { syncAvailability } from "./parkside";
-import { priceProperty } from "./pricing";
+import { priceProperty, pricesReady } from "./pricing";
 import { fullSync } from "./fullsync";
 import { bookingComVerdict } from "./listings";
 import { mirrorPortalBookings } from "./portalMirror";
@@ -76,6 +76,13 @@ export async function syncNow(propertyId: string): Promise<{ ok: boolean; steps:
     .maybeSingle();
   if (!channel?.channex_channel_id || !channel.is_active) {
     add("Booking.com", false, "This listing's Booking.com channel is switched off, so nothing goes to Booking.com");
+    return { ok: false, steps };
+  }
+
+  // Never push placeholder prices to Booking.com.
+  const prices = await pricesReady(propertyId);
+  if (!prices.ready) {
+    add("Booking.com", false, `Refusing to push to Booking.com until prices are set: ${prices.reason}`);
     return { ok: false, steps };
   }
 

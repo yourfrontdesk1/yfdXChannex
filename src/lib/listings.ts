@@ -3,7 +3,7 @@ import { db } from "./db";
 import { channexRequest } from "./channex";
 import { connectBookingCom, provisionProperty } from "./provision";
 import { syncAvailability } from "./parkside";
-import { priceProperty } from "./pricing";
+import { priceProperty, pricesReady } from "./pricing";
 import { fullSync } from "./fullsync";
 
 /**
@@ -266,6 +266,14 @@ export async function goLive(propertyId: string, result?: ListingResult): Promis
     return out;
   }
   out.channel_id = channelId;
+
+  // Never go live on placeholder prices. A fence left at floor = base = ceiling,
+  // or switched off, means the real rate was never set.
+  const prices = await pricesReady(propertyId);
+  if (!prices.ready) {
+    say("live", false, `Refusing to go live until prices are set: ${prices.reason}`);
+    return out;
+  }
 
   const activated = await channexRequest("POST", `/channels/${channelId}/activate`);
   if (!activated.ok) {
