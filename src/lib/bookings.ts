@@ -269,6 +269,15 @@ function externalRefFor(revision: BookingRevision, revisionId: string): string {
  */
 async function forwardDownstream(property: Property, revision: BookingRevision): Promise<boolean> {
   if (!property.downstream_url) return false;
+
+  // NEW direct-forward flow, opt-in per property. Default false (see
+  // db/015_use_direct_forward.sql) keeps every existing property on the live
+  // path below, so nothing changes for production until a property has
+  // use_direct_forward set true. This is the only gate on the new flow.
+  if (property.use_direct_forward) {
+    return forwardDirect(property, revision);
+  }
+
   const supabase = db();
   const revisionId = revision.id ?? revision.revision_id;
 
@@ -602,6 +611,497 @@ async function forwardToGuestPortal(property: Property, revision: BookingRevisio
 }
 
 
+/* -------------------------------------------------------------------------- */
+/* Direct-forward flow (hub -> portal direct, then booking.filed -> YFD)       */
+/*                                                                            */
+/* Used only when property.use_direct_forward is true. It fixes gaps 1, 2 and  */
+/* the hub half of gap 3: every apartment of a multi-room reservation is       */
+/* forwarded (not just rooms[0]); a durable per-room assignment means a modify  */
+/* never re-picks a flat; and a dropped room is cancelled explicitly rather     */
+/* than silently reopened. Matches the contract field names exactly.           */
+/* -------------------------------------------------------------------------- */
+
+type PortalBookingResponse = {
+  booking_id?: string | null;
+  room?: string | null;
+  room_key?: string | null;
+  token?: string | null;
+  portal_url?: string | null;
+  status?: string | null;
+};
+
+type DeactivatedRoom = { booking_id: string | null; room: string | null; room_key: string | null };
+
+/** Occupancy as a tuple, for a stable tie-break. */
+function roomOccupancy(room: BookingRoom): [number, number, number] {
+  const o = room.occupancy ?? {};
+  return [o.adults ?? 0, o.children ?? 0, o.infants ?? 0];
+}
+
+/**
+ * Deterministic order for rooms of the same type: earliest check-in, then
+ * check-out, then occupancy. This is how the ordinal is assigned at first sight
+ * and how incoming rooms are ordered when mapped back to stored keys.
+ */
+function compareRooms(a: BookingRoom, b: BookingRoom): number {
+  if (a.checkin_date !== b.checkin_date) return a.checkin_date < b.checkin_date ? -1 : 1;
+  if (a.checkout_date !== b.checkout_date) return a.checkout_date < b.checkout_date ? -1 : 1;
+  const [aa, ac, ai] = roomOccupancy(a);
+  const [ba, bc, bi] = roomOccupancy(b);
+  if (aa !== ba) return aa - ba;
+  if (ac !== bc) return ac - bc;
+  return ai - bi;
+}
+
+function groupIndicesByType(rooms: BookingRoom[]): Map<string, number[]> {
+  const m = new Map<string, number[]>();
+  rooms.forEach((r, i) => {
+    const t = r.room_type_id ?? "unknown";
+    const arr = m.get(t) ?? [];
+    arr.push(i);
+    m.set(t, arr);
+  });
+  return m;
+}
+
+function parseKey(key: string): { room_type_id: string; ordinal: number } {
+  const i = key.lastIndexOf("#");
+  if (i < 0) return { room_type_id: key, ordinal: 0 };
+  return { room_type_id: key.slice(0, i), ordinal: Number(key.slice(i + 1)) || 0 };
+}
+
+/** room_key = `${channex_room_type_id}#${ordinal}`, ordinal 1-based per type. */
+function assignFreshKeys(rooms: BookingRoom[]): string[] {
+  const keys: string[] = new Array(rooms.length);
+  for (const [typeId, idxs] of groupIndicesByType(rooms)) {
+    const sorted = [...idxs].sort((a, b) => compareRooms(rooms[a], rooms[b]));
+    sorted.forEach((idx, ord) => {
+      keys[idx] = `${typeId}#${ord + 1}`;
+    });
+  }
+  return keys;
+}
+
+/**
+ * Map the rooms of a later revision onto the keys we already assigned, WITHOUT
+ * recomputing any ordinal. Same type first (in date order), then any surviving
+ * cross-type slot (a room type change), then genuinely new rooms get a fresh
+ * ordinal past the highest already seen. Stored keys that no incoming room
+ * claims have dropped out and are returned for an explicit cancel.
+ *
+ * Note: room_assignments does not persist dates, so "nearest dates" within a
+ * type degrades to the same stable (checkin, checkout, occupancy) order used at
+ * first sight. For the common case (N rooms of one type over the same nights)
+ * this is exact; the reshuffle risk the contract already flags (a sub-room date
+ * change among same-type rooms) is unchanged by this.
+ */
+function matchStoredKeys(
+  rooms: BookingRoom[],
+  stored: { room_key: string; apartment: string | null }[],
+): { keys: string[]; reassign: boolean[]; droppedKeys: { room_key: string; apartment: string | null }[] } {
+  const keys: string[] = new Array(rooms.length);
+  const reassign: boolean[] = new Array(rooms.length).fill(false);
+
+  type Avail = { room_key: string; apartment: string | null; room_type_id: string; ordinal: number; used: boolean };
+  const avail: Avail[] = stored.map((s) => ({ ...s, ...parseKey(s.room_key), used: false }));
+  const assignedIdx = new Set<number>();
+
+  // Pass 1: same room type, matched in deterministic date order.
+  for (const [typeId, idxs] of groupIndicesByType(rooms)) {
+    const sortedIdx = [...idxs].sort((a, b) => compareRooms(rooms[a], rooms[b]));
+    const sameType = avail.filter((a) => a.room_type_id === typeId && !a.used).sort((a, b) => a.ordinal - b.ordinal);
+    const n = Math.min(sortedIdx.length, sameType.length);
+    for (let k = 0; k < n; k++) {
+      keys[sortedIdx[k]] = sameType[k].room_key;
+      sameType[k].used = true;
+      assignedIdx.add(sortedIdx[k]);
+    }
+  }
+
+  // Pass 2: cross type — a surviving slot whose room type changed.
+  const remainingRooms = rooms.map((_, i) => i).filter((i) => !assignedIdx.has(i)).sort((a, b) => compareRooms(rooms[a], rooms[b]));
+  const remainingKeys = avail
+    .filter((a) => !a.used)
+    .sort((a, b) => (a.room_type_id !== b.room_type_id ? a.room_type_id.localeCompare(b.room_type_id) : a.ordinal - b.ordinal));
+  let kk = 0;
+  for (const i of remainingRooms) {
+    if (kk >= remainingKeys.length) break;
+    const key = remainingKeys[kk++];
+    keys[i] = key.room_key;
+    key.used = true;
+    reassign[i] = true;
+    assignedIdx.add(i);
+  }
+
+  // Pass 3: genuinely new rooms — a fresh ordinal past the highest seen, so no
+  // existing ordinal is ever recomputed.
+  const maxOrdinal = new Map<string, number>();
+  for (const a of avail) maxOrdinal.set(a.room_type_id, Math.max(maxOrdinal.get(a.room_type_id) ?? 0, a.ordinal));
+  for (const key of keys) {
+    if (!key) continue;
+    const { room_type_id, ordinal } = parseKey(key);
+    maxOrdinal.set(room_type_id, Math.max(maxOrdinal.get(room_type_id) ?? 0, ordinal));
+  }
+  for (let i = 0; i < rooms.length; i++) {
+    if (assignedIdx.has(i)) continue;
+    const typeId = rooms[i].room_type_id ?? "unknown";
+    const next = (maxOrdinal.get(typeId) ?? 0) + 1;
+    maxOrdinal.set(typeId, next);
+    keys[i] = `${typeId}#${next}`;
+    assignedIdx.add(i);
+  }
+
+  const droppedKeys = avail.filter((a) => !a.used).map((a) => ({ room_key: a.room_key, apartment: a.apartment }));
+  return { keys, reassign, droppedKeys };
+}
+
+/** channex_room_type_id -> { name, apartments } for candidate lists and names. */
+async function loadRoomTypeIndex(propertyId: string): Promise<Map<string, { name: string; apartments: string[] }>> {
+  const { data } = await db().from("room_types").select("name, channex_room_type_id, apartments").eq("property_id", propertyId);
+  const map = new Map<string, { name: string; apartments: string[] }>();
+  for (const rt of data ?? []) {
+    if (rt.channex_room_type_id) {
+      map.set(rt.channex_room_type_id as string, {
+        name: (rt.name as string) ?? "",
+        apartments: (rt.apartments as string[] | null) ?? [],
+      });
+    }
+  }
+  return map;
+}
+
+async function recordForwardError(revisionId: string | undefined, message: string): Promise<void> {
+  await db().from("inbound_bookings").update({ forward_error: message.slice(0, 500) }).eq("revision_id", revisionId);
+}
+
+/** booking.filed to the YourFrontDesk channex-webhook. Errors are collected, not thrown. */
+async function postBookingFiled(url: string, secret: string, body: Record<string, unknown>, errors: string[]): Promise<void> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-channex-webhook-secret": secret },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) errors.push(`yfd booking.filed: ${res.status} ${(await res.text()).slice(0, 200)}`);
+  } catch (e) {
+    errors.push(`yfd booking.filed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+const guestOf = (revision: BookingRevision) => ({
+  first_name: revision.customer?.name ?? "Guest",
+  last_name: revision.customer?.surname ?? (revision.ota_name ?? "Booking"),
+  email: revision.customer?.mail ?? "",
+  phone: revision.customer?.phone ?? "",
+});
+
+/**
+ * The new flow: one call per apartment to the portal under the same
+ * external_ref, each returning the apartment the portal picked, then one
+ * booking.filed to YFD per apartment. Availability has already been applied by
+ * ingestRevision; this only owns the handover.
+ */
+async function forwardDirect(property: Property, revision: BookingRevision): Promise<boolean> {
+  const supabase = db();
+  const revisionId = revision.id ?? revision.revision_id;
+  const status = String(revision.status).toLowerCase();
+  const externalRef = externalRefFor(revision, revisionId);
+
+  // Claim the revision before any work. The webhook, the 15-minute poll and the
+  // retry cron can all reach here for the same revision at once; two concurrent
+  // first-time POSTs for the same new room_key can orphan a guest row. The
+  // conditional UPDATE is atomic at the row level: whoever it affects holds the
+  // claim, everyone else gets no row back and returns quietly. The 5-minute
+  // window lets a crashed forward be re-claimed.
+  const claimBefore = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const { data: claimed } = await supabase
+    .from("inbound_bookings")
+    .update({ forward_claimed_at: new Date().toISOString() })
+    .eq("revision_id", revisionId)
+    .or(`forward_claimed_at.is.null,forward_claimed_at.lt.${claimBefore}`)
+    .select("id");
+  if (!claimed || claimed.length === 0) return false;
+
+  const portalBase = process.env.PORTAL_API_URL?.replace(/\/$/, "");
+  const portalKey = process.env.PORTAL_API_KEY;
+  if (!portalBase || !portalKey) {
+    await recordForwardError(revisionId, "PORTAL_API_URL or PORTAL_API_KEY is not set");
+    return false;
+  }
+  const portalUrl = `${portalBase}/api/external/bookings`;
+  // Preview deployments of the portal sit behind Vercel deployment protection.
+  // When PORTAL_PREVIEW_BYPASS is set (staging rehearsal only) every portal
+  // fetch carries the Protection Bypass for Automation header; unset in
+  // production, so the header is never added there and the live path is
+  // unaffected. authHeaders is used by every portal fetch in forwardDirect and
+  // is passed through to forwardDirectCancel, so this one place covers them all.
+  const previewBypass = process.env.PORTAL_PREVIEW_BYPASS;
+  const authHeaders: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${portalKey}`,
+    ...(previewBypass ? { "x-vercel-protection-bypass": previewBypass } : {}),
+  };
+
+  // booking.filed is sent to the YFD channex-webhook named by downstream_url,
+  // authenticated with the property's downstream secret.
+  const { data: propRow } = await supabase.from("properties").select("downstream_secret").eq("id", property.id).single();
+  const downstreamSecret = (propRow?.downstream_secret as string | null) ?? null;
+  const filedUrl = property.downstream_url as string;
+
+  if (status === "cancelled") {
+    return forwardDirectCancel(property, revision, externalRef, revisionId, portalUrl, authHeaders, filedUrl, downstreamSecret);
+  }
+
+  const rooms = revision.rooms ?? [];
+  if (rooms.length === 0) {
+    await recordForwardError(revisionId, "Revision carries no rooms to forward");
+    return false;
+  }
+
+  const typeIndex = await loadRoomTypeIndex(property.id);
+
+  const { data: storedRows } = await supabase.from("room_assignments").select("room_key, apartment").eq("external_ref", externalRef);
+  const stored = (storedRows ?? []).map((r) => ({ room_key: r.room_key as string, apartment: (r.apartment as string | null) ?? null }));
+
+  const assigned = stored.length
+    ? matchStoredKeys(rooms, stored)
+    : { keys: assignFreshKeys(rooms), reassign: rooms.map(() => false), droppedKeys: [] as { room_key: string; apartment: string | null }[] };
+
+  const filedStatus = status === "modified" ? "modified" : "new";
+  const unitsBooked = rooms.length;
+  const currency = revision.currency ?? "GBP";
+  const pc = String(revision.payment_collect ?? "").toLowerCase();
+  // Only channels known to collect the FULL stay up front may mark the share
+  // paid in full. Booking.com "Payments by Booking.com" may be a deposit only,
+  // so any other 'ota' case is sent as null (the portal treats it as balance
+  // due) rather than over-marking a partial prepayment as fully paid.
+  const otaName = String(revision.ota_name ?? "").toLowerCase();
+  const fullPrepayChannel = ["expedia", "airbnb", "hotelbeds"].some((c) => otaName.includes(c));
+  const guest = guestOf(revision);
+  // Channels Channex messaging does not cover cannot be reached by Charlotte, so
+  // the portal must send the portal link directly and at once rather than wait on
+  // a thread. Hotelbeds, Agoda and Expedia EPS have no Channex thread; ota_name is
+  // the marker. If EPS ever arrives indistinguishable from ordinary Expedia this
+  // will miss it, so confirm the real ota_name on the first EPS booking.
+  const otaLower = String(revision.ota_name ?? "").toLowerCase();
+  const noThread = ["hotelbeds", "agoda", "expedia partner", "eps"].some((n) => otaLower.includes(n));
+
+  const errors: string[] = [];
+  const filedBodies: Record<string, unknown>[] = [];
+
+  for (let i = 0; i < rooms.length; i++) {
+    const room = rooms[i];
+    const roomKey = assigned.keys[i];
+    const reassign = assigned.reassign[i];
+    const storedApt = stored.find((s) => s.room_key === roomKey)?.apartment ?? null;
+    const typeInfo = room.room_type_id ? typeIndex.get(room.room_type_id) : undefined;
+    const roomTypeName = typeInfo?.name ?? null;
+    const candidates = typeInfo?.apartments ?? [];
+
+    const amountShare = room.amount != null ? Number(room.amount) : revision.amount ? Number(revision.amount) / rooms.length : null;
+    // ota_paid_amount: property -> 0; ota on a full-prepay channel -> this
+    // apartment's full share; any other ota (e.g. Payments-by-Booking.com) ->
+    // null (balance due); otherwise 0.
+    const otaPaid: number | null = pc === "property" ? 0 : pc === "ota" ? (fullPrepayChannel ? amountShare ?? null : null) : 0;
+    const checkIn = room.checkin_date ?? revision.arrival_date;
+    const checkOut = room.checkout_date ?? revision.departure_date;
+
+    const portalBody = {
+      external_ref: externalRef,
+      revision_id: revisionId,
+      hub_property_id: property.id,
+      room_key: roomKey,
+      units_booked: unitsBooked,
+      check_in: checkIn,
+      check_out: checkOut,
+      guest,
+      amount: amountShare,
+      currency,
+      // source "channex" so the portal skips minting a payment link on the
+      // request path (contract); channel carries the real OTA name.
+      source: "channex",
+      channel: revision.ota_name ?? null,
+      room_type: roomTypeName,
+      nightly_rates: room.days ?? null,
+      payment_collect: revision.payment_collect ?? null,
+      payment_type: revision.payment_type ?? null,
+      ota_paid_amount: otaPaid,
+      reassign,
+      candidates,
+      no_thread: noThread,
+    };
+
+    let portalRoom = storedApt;
+    let bookingId: string | null = null;
+    let token: string | null = null;
+    let portalLink: string | null = null;
+
+    try {
+      const res = await fetch(portalUrl, { method: "POST", headers: authHeaders, body: JSON.stringify(portalBody) });
+      const text = await res.text();
+      if (!res.ok) {
+        errors.push(`portal ${roomKey}: ${res.status} ${text.slice(0, 200)}`);
+        continue;
+      }
+      let p: PortalBookingResponse = {};
+      try {
+        p = JSON.parse(text) as PortalBookingResponse;
+      } catch {}
+      portalRoom = p.room ?? storedApt;
+      bookingId = p.booking_id ?? null;
+      token = p.token ?? null;
+      portalLink = p.portal_url ?? null;
+    } catch (e) {
+      errors.push(`portal ${roomKey}: ${e instanceof Error ? e.message : String(e)}`);
+      continue;
+    }
+
+    // Persist (or refresh) the durable assignment. revision_id records which
+    // revision last wrote it; apartment keeps the last apartment the portal held.
+    await supabase
+      .from("room_assignments")
+      .upsert(
+        { external_ref: externalRef, room_key: roomKey, apartment: portalRoom ?? storedApt ?? null, revision_id: revisionId },
+        { onConflict: "external_ref,room_key" },
+      );
+
+    filedBodies.push({
+      event: "booking.filed",
+      status: filedStatus,
+      booking_kind: "guest",
+      external_ref: externalRef,
+      revision_id: revisionId,
+      hub_property_id: property.id,
+      room: portalRoom,
+      room_key: roomKey,
+      units_booked: unitsBooked,
+      booking_id: bookingId,
+      token,
+      portal_url: portalLink,
+      guest,
+      check_in: checkIn,
+      check_out: checkOut,
+      amount: amountShare,
+      currency,
+      source: revision.ota_name ?? null,
+      ota_paid_amount: otaPaid,
+      no_thread: noThread,
+    });
+  }
+
+  // booking.filed to YFD for every apartment the portal accepted.
+  if (downstreamSecret) {
+    for (const body of filedBodies) await postBookingFiled(filedUrl, downstreamSecret, body, errors);
+  } else if (filedBodies.length) {
+    errors.push("No downstream secret set; booking.filed not sent to YourFrontDesk");
+  }
+
+  // Explicit cancels for any stored key that dropped out of this revision, so a
+  // removed room is deactivated rather than silently reopened.
+  if (assigned.droppedKeys.length) {
+    const cancelledRooms: DeactivatedRoom[] = [];
+    for (const dk of assigned.droppedKeys) {
+      try {
+        const res = await fetch(portalUrl, {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({ status: "cancelled", external_ref: externalRef, room_key: dk.room_key }),
+        });
+        if (!res.ok) errors.push(`portal drop ${dk.room_key}: ${res.status} ${(await res.text()).slice(0, 200)}`);
+      } catch (e) {
+        errors.push(`portal drop ${dk.room_key}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      cancelledRooms.push({ booking_id: null, room: dk.apartment, room_key: dk.room_key });
+    }
+    if (downstreamSecret && cancelledRooms.length) {
+      await postBookingFiled(
+        filedUrl,
+        downstreamSecret,
+        { event: "booking.filed", status: "cancelled", external_ref: externalRef, revision_id: revisionId, hub_property_id: property.id, rooms: cancelledRooms },
+        errors,
+      );
+    }
+  }
+
+  if (errors.length) {
+    await recordForwardError(revisionId, errors.join(" | "));
+    return false;
+  }
+  await supabase.from("inbound_bookings").update({ forwarded_at: new Date().toISOString(), forward_error: null }).eq("revision_id", revisionId);
+  return true;
+}
+
+/**
+ * A whole-reference cancellation. The portal deactivates every active row for
+ * the ref and returns the rooms it deactivated; the hub forwards those to YFD
+ * as a cancel booking.filed. Idempotent: deactivating already-cancelled rows is
+ * a no-op, so the retry cron can re-run a failed cancel safely.
+ */
+async function forwardDirectCancel(
+  property: Property,
+  revision: BookingRevision,
+  externalRef: string,
+  revisionId: string | undefined,
+  portalUrl: string,
+  authHeaders: Record<string, string>,
+  filedUrl: string,
+  downstreamSecret: string | null,
+): Promise<boolean> {
+  const supabase = db();
+  const errors: string[] = [];
+  let deactivated: DeactivatedRoom[] = [];
+
+  try {
+    const res = await fetch(portalUrl, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({ status: "cancelled", external_ref: externalRef }),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      errors.push(`portal cancel: ${res.status} ${text.slice(0, 200)}`);
+    } else {
+      // The portal returns the deactivated rows as `rooms` (an alias of
+      // `cancelled_rows`); empty [] with not_found:true means nothing matched.
+      let p: { rooms?: DeactivatedRoom[]; cancelled_rows?: DeactivatedRoom[] } = {};
+      try {
+        p = JSON.parse(text) as { rooms?: DeactivatedRoom[]; cancelled_rows?: DeactivatedRoom[] };
+      } catch {}
+      const list = Array.isArray(p.rooms) ? p.rooms : Array.isArray(p.cancelled_rows) ? p.cancelled_rows : null;
+      if (list) {
+        deactivated = list.map((r) => ({ booking_id: r.booking_id ?? null, room: r.room ?? null, room_key: r.room_key ?? null }));
+      }
+    }
+  } catch (e) {
+    errors.push(`portal cancel: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // If the portal did not echo the deactivated rooms, fall back to the hub's own
+  // record of the reference's apartments.
+  if (!deactivated.length) {
+    const { data: storedRows } = await supabase.from("room_assignments").select("room_key, apartment").eq("external_ref", externalRef);
+    deactivated = (storedRows ?? []).map((r) => ({ booking_id: null, room: (r.apartment as string | null) ?? null, room_key: r.room_key as string }));
+  }
+
+  if (downstreamSecret) {
+    await postBookingFiled(
+      filedUrl,
+      downstreamSecret,
+      { event: "booking.filed", status: "cancelled", external_ref: externalRef, revision_id: revisionId, hub_property_id: property.id, rooms: deactivated },
+      errors,
+    );
+  } else {
+    errors.push("No downstream secret set; cancel booking.filed not sent to YourFrontDesk");
+  }
+
+  if (errors.length) {
+    await recordForwardError(revisionId, errors.join(" | "));
+    return false;
+  }
+  await supabase.from("inbound_bookings").update({ forwarded_at: new Date().toISOString(), forward_error: null }).eq("revision_id", revisionId);
+  return true;
+}
+
 export type RetryResult = { pending: number; retried: number; succeeded: number; failed: number; errors: string[] };
 
 /**
@@ -623,11 +1123,14 @@ export async function retryUnforwarded(limit = 20): Promise<RetryResult> {
   const { data: cutoverRow } = await supabase.from("hub_config").select("value").eq("key", "forward_cutover_at").maybeSingle();
   const cutover = (cutoverRow?.value as string) ?? new Date().toISOString();
 
+  // Cancellations are retried the same as any other event (gap 3 / item 4). A
+  // failed cancel forward leaves forwarded_at null and forward_error set, so it
+  // is picked up here like a failed new or modify. forwardDownstream /
+  // forwardDirect are idempotent on a re-send, so retrying a cancel is safe.
   const { data: stuck, error } = await supabase
     .from("inbound_bookings")
     .select("id, property_id, payload, status, received_at")
     .is("forwarded_at", null)
-    .neq("status", "cancelled")
     .not("property_id", "is", null)
     .gte("received_at", cutover)
     .order("received_at", { ascending: true })

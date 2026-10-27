@@ -18,7 +18,10 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const propertyId = url.searchParams.get("property");
   const from = url.searchParams.get("from") || today();
-  const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 30), 1), 120);
+  // Up to 400 days: the pricing engine prices out to 499 (its far horizon), and
+  // the PMS price calendar shows a year. The ari select below is paged, so a
+  // wide window costs a few more round trips, not a truncated answer.
+  const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 30), 1), 400);
   const to = addDays(from, days - 1);
 
   const supabase = db();

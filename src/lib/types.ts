@@ -14,6 +14,12 @@ export type Property = {
   timezone: string;
   channex_property_id: string | null;
   downstream_url: string | null;
+  /**
+   * Opt-in gate for the direct-forward flow (hub -> portal direct, then
+   * booking.filed -> YourFrontDesk). Default false keeps the property on the
+   * live forwardToYourFrontDesk / forwardToGuestPortal path.
+   */
+  use_direct_forward?: boolean | null;
   is_active: boolean;
 };
 
