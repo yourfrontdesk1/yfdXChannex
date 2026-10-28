@@ -155,25 +155,34 @@ export async function auditListings(): Promise<{ checks: AuditCheck[]; failed: n
       .is("forwarded_at", null);
     add("bookings reached YourFrontDesk", !(stuck ?? []).length, (stuck ?? []).length ? `${stuck!.length} not forwarded: ${stuck!.map((s) => s.ota_reservation_code).join(", ")}` : "none stuck in 7 days");
 
-    // Every guest gets their portal link, every time. A new booking arriving in
-    // the next 60 days with no link after 15 minutes means a guest who cannot
-    // check in. Bookings further out are left alone on purpose: a link for a
-    // stay next summer was not wanted (Leon, 6 October 2026).
+    // Every guest arriving in the next 60 days should have their portal link.
+    // Judge each booking by its LATEST revision, and count it linked if ANY of
+    // its revisions carries a link time (the portal may have sent it before the
+    // switch). Skip superseded revisions, cancelled bookings, and bookings with
+    // no apartment (unplaced Eclipse rows and do-not-contact guests are not
+    // awaiting a link). Test and inactive properties are already excluded by the
+    // active-channel loop. Bookings further out are left alone on purpose: a link
+    // for a stay next summer was not wanted (Leon, 6 October 2026).
     const soon = iso(new Date(Date.now() + 60 * 86400000));
     const settled = new Date(Date.now() - 15 * 60000).toISOString();
-    const { data: unlinked } = await hub
+    const { data: rows } = await hub
       .from("inbound_bookings")
-      .select("ota_reservation_code, guest_name, arrival_date, status")
+      .select("ota_reservation_code, guest_name, arrival_date, status, apartment, link_sent_at, received_at")
       .eq("property_id", c.property_id)
-      .eq("status", "new")
-      .is("link_sent_at", null)
       .gte("arrival_date", iso(new Date()))
       .lte("arrival_date", soon)
-      .lte("received_at", settled);
-    const cancelledCodes = new Set(
-      ((await hub.from("inbound_bookings").select("ota_reservation_code").eq("property_id", c.property_id).eq("status", "cancelled")).data ?? []).map((r) => r.ota_reservation_code),
-    );
-    const missing = (unlinked ?? []).filter((b) => !cancelledCodes.has(b.ota_reservation_code));
+      .lte("received_at", settled)
+      .order("received_at", { ascending: true });
+    const latest = new Map<string, { guest_name: string; arrival_date: string; status: string; apartment: string | null }>();
+    const linkedAny = new Set<string>();
+    for (const r of rows ?? []) {
+      const code = r.ota_reservation_code as string;
+      latest.set(code, { guest_name: r.guest_name as string, arrival_date: r.arrival_date as string, status: String(r.status), apartment: (r.apartment as string | null) ?? null });
+      if (r.link_sent_at) linkedAny.add(code);
+    }
+    const missing = [...latest.entries()]
+      .filter(([code, b]) => b.status !== "cancelled" && b.apartment && !linkedAny.has(code))
+      .map(([, b]) => b);
     add("every guest got their link", missing.length === 0, missing.length ? `${missing.length} without: ${missing.map((b) => `${b.guest_name} (${b.arrival_date})`).join(", ")}` : "all sent");
   }
 
