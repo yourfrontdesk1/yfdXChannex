@@ -93,7 +93,8 @@ export async function auditListings(): Promise<{ checks: AuditCheck[]; failed: n
     // Channex was higher on this run AND on the previous one. One hub_config
     // row per channel holds the previous run's oversell set.
     const oversell: string[] = [];
-    const rateOff: string[] = [];
+    const rateDrift: string[] = [];
+    const rateEg = new Map<string, string>();
     for (const row of ari ?? []) {
       if (row.rate_plan_id === null) {
         const rt = (rts ?? []).find((r) => r.id === row.room_type_id);
@@ -105,8 +106,10 @@ export async function auditListings(): Promise<{ checks: AuditCheck[]; failed: n
         const plan = (plans ?? []).find((p) => p.id === row.rate_plan_id);
         if (!plan) continue;
         const theirs = rates.body?.data?.[plan.channex_rate_plan_id as string]?.[row.date as string]?.rate;
-        if (row.rate !== null && Number(theirs) !== Number(row.rate) && rateOff.length < 3) {
-          rateOff.push(`${row.date} £${row.rate} vs £${theirs}`);
+        if (row.rate !== null && Number(theirs) !== Number(row.rate)) {
+          const k = `${plan.channex_rate_plan_id}|${row.date}`;
+          rateDrift.push(k);
+          if (rateEg.size < 3) rateEg.set(k, `${row.date} £${row.rate} vs £${theirs}`);
         }
       }
     }
@@ -124,9 +127,24 @@ export async function auditListings(): Promise<{ checks: AuditCheck[]; failed: n
         ? `${persistent.length} night(s) Channex over hub across 2 runs: ${persistent.slice(0, 3).map((p) => p.split("|")[1]).join(", ")}`
         : oversell.length ? `${oversell.length} in-flight this run, none persistent` : "no oversell",
     );
-    // Rate drift pushes with the same latency, so it is reported but does not
-    // fail the board on a single snapshot.
-    add("channex rate matches hub, 30 nights", true, rateOff.length ? `${rateOff.length} differ (likely in-flight): ${rateOff.join("; ")}` : "identical");
+    // Rate drift pushes with the same per-minute latency, so it gets the same
+    // rule as availability: a wrong price only fails the board when the same
+    // room and date is still wrong on the next run. A persistently wrong price
+    // is wrong prices on sale, which is exactly what should be caught.
+    const rdKey = `audit_ratedrift_${c.channex_channel_id}`;
+    const { data: prevRdRow } = await hub.from("hub_config").select("value").eq("key", rdKey).maybeSingle();
+    let prevRd: string[] = [];
+    try { prevRd = JSON.parse((prevRdRow?.value as string) ?? "[]"); } catch { prevRd = []; }
+    const prevRdSet = new Set(prevRd);
+    const persistentRd = rateDrift.filter((r) => prevRdSet.has(r));
+    await hub.from("hub_config").upsert({ key: rdKey, value: JSON.stringify(rateDrift) }, { onConflict: "key" });
+    add(
+      "channex rate matches hub, 30 nights",
+      persistentRd.length === 0,
+      persistentRd.length
+        ? `${persistentRd.length} price(s) wrong across 2 runs: ${persistentRd.slice(0, 3).map((k) => rateEg.get(k) ?? k.split("|")[1]).join("; ")}`
+        : rateDrift.length ? `${rateDrift.length} in-flight this run, none persistent` : "identical",
+    );
 
     const since = new Date(Date.now() - 7 * 86400000).toISOString();
     const { data: stuck } = await hub
