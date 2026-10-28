@@ -340,10 +340,15 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
       .limit(1)
       .maybeSingle();
 
-    // No booking behind the thread means no facts to answer with. A person
-    // takes that one.
+    // No booking behind the thread means no facts to answer with. Hand it to a
+    // person in YourFrontDesk instead of dropping it silently: the skip used to
+    // just continue, so a guest whose booking the hub could not resolve went
+    // unanswered with nobody told.
     if (!booking?.portal_url) {
+      await escalate(threadId, bookingId, "no booking record behind the thread, needs a person", text);
+      await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
       result.skipped_no_booking++;
+      result.escalated++;
       continue;
     }
 
