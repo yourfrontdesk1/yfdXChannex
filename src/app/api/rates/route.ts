@@ -100,6 +100,10 @@ export async function POST(request: Request) {
   }
 
   const errors: string[] = [];
+  // Plan names the caller sent that do not exist for the room (e.g. a plan a
+  // customer added that the hub has not been given). Surfaced per name in
+  // by_plan rather than dropped silently, so the sender can see it never landed.
+  const unresolved = new Map<string, number>();
   // Normalise + resolve every row first.
   type Resolved = { room_type_id: string; rate_plan_id: string; date: string; rate: number };
   const resolved: Resolved[] = [];
@@ -114,7 +118,7 @@ export async function POST(request: Request) {
     if (rpKey) {
       const list = plansByRoom.get(rtId) ?? [];
       const match = list.find((p) => p.id === rpKey) ?? list.find((p) => p.name === rpKey);
-      if (!match) { errors.push(`row ${i}: unknown rate_plan "${rpKey}" for "${key}"`); continue; }
+      if (!match) { unresolved.set(rpKey, (unresolved.get(rpKey) ?? 0) + 1); continue; }
       planId = match.id;
     } else {
       planId = planOf.get(rtId);
@@ -126,8 +130,15 @@ export async function POST(request: Request) {
     resolved.push({ room_type_id: rtId, rate_plan_id: planId, date: r.date, rate: Math.round(rate) });
   }
 
+  // by_plan starts with any unresolved plan names, so they are visible even when
+  // nothing resolved; applied/unchanged are added below.
+  const idToName = new Map<string, string>();
+  for (const list of plansByRoom.values()) for (const p of list) idToName.set(p.id, p.name);
+  const byPlan: Record<string, { applied: number; unchanged: number; unresolved?: number }> = {};
+  for (const [name, count] of unresolved) (byPlan[name] ??= { applied: 0, unchanged: 0 }).unresolved = count;
+
   if (resolved.length === 0) {
-    return NextResponse.json({ applied: 0, unchanged: 0, skipped: rows.length, errors, by_plan: {} });
+    return NextResponse.json({ applied: 0, unchanged: 0, skipped: rows.length, errors, by_plan: byPlan });
   }
 
   // Idempotency: read current rates for exactly these (plan,date) and only write
@@ -153,9 +164,6 @@ export async function POST(request: Request) {
   const unchanged = resolved.length - changed.length;
 
   // Per-plan applied/unchanged counts, so the caller can see each plan landed.
-  const idToName = new Map<string, string>();
-  for (const list of plansByRoom.values()) for (const p of list) idToName.set(p.id, p.name);
-  const byPlan: Record<string, { applied: number; unchanged: number }> = {};
   for (const r of resolved) {
     const name = idToName.get(r.rate_plan_id) ?? r.rate_plan_id;
     const slot = (byPlan[name] ??= { applied: 0, unchanged: 0 });
