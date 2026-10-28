@@ -11,14 +11,21 @@ export const maxDuration = 60;
  * trigger push it to Channex. The hub computes nothing: the number sent is the
  * number the guest sees, no gross-up, no tax added.
  *
- * Body: { property_id, rates: [{ room_type, date, rate }] }, up to 1000 rows.
- * room_type is the hub room_types.id or its exact name. rate is published GBP.
+ * Body: { property_id, rates: [{ room_type, rate_plan?, date, rate }] }, up to
+ * 1000 rows. room_type is the hub room_types.id or its exact name. rate_plan is
+ * optional: the hub rate_plans.id or its exact name ("Flexible",
+ * "Non-refundable", "Weekly", "Wifi", "Monthly"); omitted, it targets the
+ * primary plan. rate is published GBP.
  * Idempotent: a row whose rate already matches is left untouched, so no outbox
  * churn and nothing re-sent to Booking.com.
  */
 
-type RateRow = { room_type?: string; date?: string; rate?: number };
-type RatesBody = { property_id?: string; rates?: RateRow[] };
+type RateRow = { room_type?: string; rate_plan?: string; date?: string; rate?: number };
+// rates carries the primary plan (Flexible) with no rate_plan; plan_rates
+// carries the other plans (Non-refundable, Weekly, Monthly, Wifi), each naming
+// its rate_plan. Both are processed the same way; plan_rates rows simply have
+// rate_plan set. YourFrontDesk owns the prices; the hub only stores and passes.
+type RatesBody = { property_id?: string; rates?: RateRow[]; plan_rates?: RateRow[] };
 
 function safeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -49,10 +56,12 @@ export async function POST(request: Request) {
   }
 
   const propertyId = typeof body.property_id === "string" ? body.property_id.trim() : "";
-  const rows = Array.isArray(body.rates) ? body.rates : [];
+  const baseRows = Array.isArray(body.rates) ? body.rates : [];
+  const planRows = Array.isArray(body.plan_rates) ? body.plan_rates : [];
+  const rows = [...baseRows, ...planRows];
   if (!propertyId) return NextResponse.json({ error: "property_id is required" }, { status: 400 });
-  if (rows.length === 0) return NextResponse.json({ applied: 0, unchanged: 0, skipped: 0, errors: [] });
-  if (rows.length > 1000) return NextResponse.json({ error: "At most 1000 rates per call" }, { status: 400 });
+  if (rows.length === 0) return NextResponse.json({ applied: 0, unchanged: 0, skipped: 0, errors: [], by_plan: {} });
+  if (rows.length > 6000) return NextResponse.json({ error: "At most 6000 rates per call" }, { status: 400 });
 
   const supabase = db();
 
@@ -72,14 +81,22 @@ export async function POST(request: Request) {
 
   const { data: plans } = await supabase
     .from("rate_plans")
-    .select("id, room_type_id, ota_rate_plan_code, is_primary")
+    .select("id, room_type_id, name, ota_rate_plan_code, is_primary")
     .in("room_type_id", roomTypes.map((r) => r.id));
-  // The plan that sells: prefer the one with an OTA code, else the primary.
+  // Default selling plan per room, used only when a row names no rate_plan:
+  // the primary (Flexible), else any OTA-coded plan. Once several plans per room
+  // carry OTA codes (Flexible, Non-refundable, Weekly, Wifi, Monthly), a row
+  // without rate_plan would be ambiguous, so the caller should name the plan;
+  // the default stays the primary for backward compatibility.
   const planOf = new Map<string, string>();
+  const plansByRoom = new Map<string, { id: string; name: string }[]>();
   for (const p of plans ?? []) {
     const rt = p.room_type_id as string;
-    if (p.ota_rate_plan_code) planOf.set(rt, p.id as string);
-    else if (!planOf.has(rt) && p.is_primary) planOf.set(rt, p.id as string);
+    if (p.is_primary) planOf.set(rt, p.id as string);
+    else if (!planOf.has(rt) && p.ota_rate_plan_code) planOf.set(rt, p.id as string);
+    const list = plansByRoom.get(rt) ?? [];
+    list.push({ id: p.id as string, name: String(p.name) });
+    plansByRoom.set(rt, list);
   }
 
   const errors: string[] = [];
@@ -90,7 +107,18 @@ export async function POST(request: Request) {
     const key = typeof r.room_type === "string" ? r.room_type.trim() : "";
     const rtId = byId.get(key) ?? byName.get(key);
     if (!rtId) { errors.push(`row ${i}: unknown room_type "${key}"`); continue; }
-    const planId = planOf.get(rtId);
+    // A row may name which rate plan it is pricing (hub rate_plans.id or its
+    // exact name, e.g. "Non-refundable"). Without it, the primary plan is used.
+    let planId: string | undefined;
+    const rpKey = typeof r.rate_plan === "string" ? r.rate_plan.trim() : "";
+    if (rpKey) {
+      const list = plansByRoom.get(rtId) ?? [];
+      const match = list.find((p) => p.id === rpKey) ?? list.find((p) => p.name === rpKey);
+      if (!match) { errors.push(`row ${i}: unknown rate_plan "${rpKey}" for "${key}"`); continue; }
+      planId = match.id;
+    } else {
+      planId = planOf.get(rtId);
+    }
     if (!planId) { errors.push(`row ${i}: no sellable rate plan for "${key}"`); continue; }
     if (typeof r.date !== "string" || !DATE.test(r.date)) { errors.push(`row ${i}: bad date`); continue; }
     const rate = Number(r.rate);
@@ -99,7 +127,7 @@ export async function POST(request: Request) {
   }
 
   if (resolved.length === 0) {
-    return NextResponse.json({ applied: 0, unchanged: 0, skipped: rows.length, errors });
+    return NextResponse.json({ applied: 0, unchanged: 0, skipped: rows.length, errors, by_plan: {} });
   }
 
   // Idempotency: read current rates for exactly these (plan,date) and only write
@@ -124,6 +152,17 @@ export async function POST(request: Request) {
   const changed = resolved.filter((r) => current.get(`${r.rate_plan_id}|${r.date}`) !== r.rate);
   const unchanged = resolved.length - changed.length;
 
+  // Per-plan applied/unchanged counts, so the caller can see each plan landed.
+  const idToName = new Map<string, string>();
+  for (const list of plansByRoom.values()) for (const p of list) idToName.set(p.id, p.name);
+  const byPlan: Record<string, { applied: number; unchanged: number }> = {};
+  for (const r of resolved) {
+    const name = idToName.get(r.rate_plan_id) ?? r.rate_plan_id;
+    const slot = (byPlan[name] ??= { applied: 0, unchanged: 0 });
+    if (current.get(`${r.rate_plan_id}|${r.date}`) !== r.rate) slot.applied++;
+    else slot.unchanged++;
+  }
+
   let applied = 0;
   for (let i = 0; i < changed.length; i += 500) {
     const batch = changed.slice(i, i + 500).map((r) => ({
@@ -138,5 +177,5 @@ export async function POST(request: Request) {
     applied += batch.length;
   }
 
-  return NextResponse.json({ applied, unchanged, skipped: rows.length - resolved.length, errors });
+  return NextResponse.json({ applied, unchanged, skipped: rows.length - resolved.length, errors, by_plan: byPlan });
 }
