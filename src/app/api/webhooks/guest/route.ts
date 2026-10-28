@@ -1,11 +1,14 @@
 import { NextResponse, after } from "next/server";
-import { answerPendingMessages } from "@/lib/reply";
+import { answerThreadNow } from "@/lib/reply";
 import { runJob, enabled } from "@/lib/ops";
 import { authorised } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { mirrorToYourFrontDesk } from "@/lib/mirror";
 
 export const dynamic = "force-dynamic";
+// The immediate answer runs in after(), and a technical failure of channex-reply
+// backs off 20s then 60s, so this function needs room past a minute.
+export const maxDuration = 300;
 
 const MESSAGE_EVENTS = new Set(["message", "message_new", "new_message", "guest_message"]);
 const REVIEW_EVENTS = new Set(["review", "review_new", "new_review", "guest_review"]);
@@ -66,11 +69,17 @@ export async function POST(request: Request) {
           { kind: "message", sender: "guest", content: text, sent_at: (payload.inserted_at ?? payload.sent_at ?? null) as string | null, message_id: id ?? null },
         );
       }
-      // Answered now, not at the next two minute run. after() lets Channex have
-      // its 200 straight away while the reply is written and sent.
+      // Answered now, not at the next cron run. after() lets Channex have its
+      // 200 straight away while the reply is written and sent. Only this thread
+      // is answered, not the whole backlog, so the message that just landed is
+      // dealt with the instant it arrives; the one minute cron is the backstop.
       if (text && fromGuest) {
+        const threadId = (payload.thread_id ?? payload.message_thread_id ?? null) as string | null;
+        const bookingId = (payload.booking_id ?? null) as string | null;
         after(async () => {
-          if (await enabled("auto_reply_enabled")) await runJob("answer-messages", answerPendingMessages).catch(() => null);
+          if (await enabled("auto_reply_enabled")) {
+            await runJob("answer-messages", () => answerThreadNow({ threadId, bookingId })).catch(() => null);
+          }
         });
       }
       return NextResponse.json({ ok: true, event, stored: "message" });

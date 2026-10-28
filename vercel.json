@@ -30,7 +30,7 @@
     },
     {
       "path": "/api/messages/answer",
-      "schedule": "*/2 * * * *"
+      "schedule": "* * * * *"
     },
     {
       "path": "/api/bookings/retry",

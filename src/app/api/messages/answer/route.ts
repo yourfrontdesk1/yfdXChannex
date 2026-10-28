@@ -4,7 +4,11 @@ import { answerPendingMessages } from "@/lib/reply";
 import { runJob, enabled } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+// A technical failure of channex-reply is now retried with a 20s then 60s
+// backoff, so a single message can take over a minute. The run carries a
+// deadline a little under this and leaves the rest for the next tick, so the
+// function fits the window even on a downstream outage.
+export const maxDuration = 300;
 
 async function run(request: Request) {
   if (!authorised(request, "WORKER_SECRET")) {

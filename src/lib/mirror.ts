@@ -9,7 +9,11 @@ import { db } from "./db";
  * Never throws: a copy that failed must not stop a guest being answered.
  */
 type Mirror =
-  | { kind: "message"; sender: "guest" | "host"; content: string; sent_at?: string | null; message_id?: string | null }
+  // source tells YourFrontDesk how the host line was produced, which it stores
+  // as ai_generated: "charlotte" for a composed reply, "system" for a canned
+  // link, welcome or holding line, "host" for one a person typed. A guest
+  // message carries no source.
+  | { kind: "message"; sender: "guest" | "host"; content: string; sent_at?: string | null; message_id?: string | null; source?: "charlotte" | "system" | "host" }
   | { kind: "escalation"; guest_message: string | null; reason: string };
 
 export async function mirrorToYourFrontDesk(

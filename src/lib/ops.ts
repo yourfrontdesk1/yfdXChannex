@@ -47,7 +47,22 @@ export type JobHealth = {
   stale: boolean;
   /** Switched off on purpose in hub_config, so its silence is expected. */
   disabled?: boolean;
+  /**
+   * Answer-messages only, so YourFrontDesk can see Charlotte is keeping up
+   * without reading the hub's tables. A guest message arriving and no reply
+   * going out is the failure a dead last_run would not catch, so these three
+   * watch the work itself, not just that the job ran. All optional, so every
+   * other job and every existing reader is unaffected.
+   */
+  last_guest_message_at?: string | null;
+  last_reply_at?: string | null;
+  oldest_unanswered_age_minutes?: number | null;
+  /** Messages set aside (no booking, rate limited, failed) in the last hour. */
+  skipped_last_hour?: number | null;
 };
+
+/** The oldest a guest message may go unanswered before answer-messages is stale. */
+const ANSWER_STALE_AGE_MINUTES = 10;
 
 /** How long each job may go quiet before silence itself is the problem. */
 const EXPECTED_GAP_MINUTES: Record<string, number> = {
@@ -137,6 +152,27 @@ export async function health(): Promise<{ healthy: boolean; jobs: JobHealth[]; c
       last_error: runs?.[0]?.ok === false ? (lastError ?? null) : null,
       stale: minutesSince > gap,
     });
+  }
+
+  // Charlotte's own heartbeat on the answer-messages entry: what came in, what
+  // went out, and how long the oldest unanswered message has been waiting. An
+  // age past the threshold is stale even if the job itself keeps running, which
+  // is the case a dead-job check misses.
+  const answer = jobs.find((j) => j.job === "answer-messages");
+  if (answer) {
+    const [lastGuest, lastReply, oldest, skipped] = await Promise.all([
+      supabase.from("guest_messages").select("received_at").eq("direction", "inbound").order("received_at", { ascending: false }).limit(1).maybeSingle(),
+      supabase.from("guest_messages").select("received_at").eq("direction", "outbound").order("received_at", { ascending: false }).limit(1).maybeSingle(),
+      supabase.from("guest_messages").select("received_at").eq("direction", "inbound").is("forwarded_at", null).order("received_at", { ascending: true }).limit(1).maybeSingle(),
+      supabase.from("guest_messages").select("id", { count: "exact", head: true }).gte("skipped_at", new Date(Date.now() - 3600000).toISOString()),
+    ]);
+    const oldestAt = oldest.data?.received_at as string | undefined;
+    const ageMinutes = oldestAt ? (Date.now() - Date.parse(oldestAt)) / 60000 : null;
+    answer.last_guest_message_at = (lastGuest.data?.received_at as string | undefined) ?? null;
+    answer.last_reply_at = (lastReply.data?.received_at as string | undefined) ?? null;
+    answer.oldest_unanswered_age_minutes = ageMinutes === null ? null : Math.round(ageMinutes);
+    answer.skipped_last_hour = skipped.count ?? 0;
+    if (ageMinutes !== null && ageMinutes > ANSWER_STALE_AGE_MINUTES) answer.stale = true;
   }
 
   // A job that has been deliberately switched off is not a job that has failed.
