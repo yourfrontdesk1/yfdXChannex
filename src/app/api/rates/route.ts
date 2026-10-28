@@ -1,0 +1,142 @@
+import { NextResponse } from "next/server";
+import { db } from "@/lib/db";
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+
+/**
+ * The pass-through. YourFrontDesk owns pricing for a property the hub does not
+ * compute (managed_pricing = false); it POSTs the published nightly rate per
+ * room type and date, and the hub only stores it and lets the existing ari
+ * trigger push it to Channex. The hub computes nothing: the number sent is the
+ * number the guest sees, no gross-up, no tax added.
+ *
+ * Body: { property_id, rates: [{ room_type, date, rate }] }, up to 1000 rows.
+ * room_type is the hub room_types.id or its exact name. rate is published GBP.
+ * Idempotent: a row whose rate already matches is left untouched, so no outbox
+ * churn and nothing re-sent to Booking.com.
+ */
+
+type RateRow = { room_type?: string; date?: string; rate?: number };
+type RatesBody = { property_id?: string; rates?: RateRow[] };
+
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function authorised(request: Request): boolean {
+  const expected = process.env.WORKER_SECRET;
+  if (!expected) return process.env.NODE_ENV !== "production";
+  const header = request.headers.get("x-worker-secret") ?? "";
+  return header !== "" && safeEqual(header, expected);
+}
+
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+export async function POST(request: Request) {
+  if (!authorised(request)) {
+    return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+  }
+
+  let body: RatesBody = {};
+  try {
+    body = (await request.json()) as RatesBody;
+  } catch {
+    return NextResponse.json({ error: "No JSON body" }, { status: 400 });
+  }
+
+  const propertyId = typeof body.property_id === "string" ? body.property_id.trim() : "";
+  const rows = Array.isArray(body.rates) ? body.rates : [];
+  if (!propertyId) return NextResponse.json({ error: "property_id is required" }, { status: 400 });
+  if (rows.length === 0) return NextResponse.json({ applied: 0, unchanged: 0, skipped: 0, errors: [] });
+  if (rows.length > 1000) return NextResponse.json({ error: "At most 1000 rates per call" }, { status: 400 });
+
+  const supabase = db();
+
+  // Resolve this property's room types once (by id and by exact name), and the
+  // single selling plan per type (the one carrying an OTA code; that is what
+  // reaches Booking.com).
+  const { data: roomTypes, error: rtErr } = await supabase
+    .from("room_types")
+    .select("id, name")
+    .eq("property_id", propertyId);
+  if (rtErr) return NextResponse.json({ error: `Room types: ${rtErr.message}` }, { status: 500 });
+  if (!roomTypes || roomTypes.length === 0) {
+    return NextResponse.json({ error: "No room types for that property" }, { status: 404 });
+  }
+  const byId = new Map(roomTypes.map((r) => [r.id as string, r.id as string]));
+  const byName = new Map(roomTypes.map((r) => [String(r.name), r.id as string]));
+
+  const { data: plans } = await supabase
+    .from("rate_plans")
+    .select("id, room_type_id, ota_rate_plan_code, is_primary")
+    .in("room_type_id", roomTypes.map((r) => r.id));
+  // The plan that sells: prefer the one with an OTA code, else the primary.
+  const planOf = new Map<string, string>();
+  for (const p of plans ?? []) {
+    const rt = p.room_type_id as string;
+    if (p.ota_rate_plan_code) planOf.set(rt, p.id as string);
+    else if (!planOf.has(rt) && p.is_primary) planOf.set(rt, p.id as string);
+  }
+
+  const errors: string[] = [];
+  // Normalise + resolve every row first.
+  type Resolved = { room_type_id: string; rate_plan_id: string; date: string; rate: number };
+  const resolved: Resolved[] = [];
+  for (const [i, r] of rows.entries()) {
+    const key = typeof r.room_type === "string" ? r.room_type.trim() : "";
+    const rtId = byId.get(key) ?? byName.get(key);
+    if (!rtId) { errors.push(`row ${i}: unknown room_type "${key}"`); continue; }
+    const planId = planOf.get(rtId);
+    if (!planId) { errors.push(`row ${i}: no sellable rate plan for "${key}"`); continue; }
+    if (typeof r.date !== "string" || !DATE.test(r.date)) { errors.push(`row ${i}: bad date`); continue; }
+    const rate = Number(r.rate);
+    if (!Number.isFinite(rate) || rate <= 0) { errors.push(`row ${i}: bad rate`); continue; }
+    resolved.push({ room_type_id: rtId, rate_plan_id: planId, date: r.date, rate: Math.round(rate) });
+  }
+
+  if (resolved.length === 0) {
+    return NextResponse.json({ applied: 0, unchanged: 0, skipped: rows.length, errors });
+  }
+
+  // Idempotency: read current rates for exactly these (plan,date) and only write
+  // the ones that actually change, so unchanged values send nothing onward.
+  const dates = [...new Set(resolved.map((r) => r.date))].sort();
+  const planIds = [...new Set(resolved.map((r) => r.rate_plan_id))];
+  const current = new Map<string, number>();
+  for (let off = 0; ; off += 1000) {
+    const { data: page, error } = await supabase
+      .from("ari")
+      .select("rate_plan_id, date, rate")
+      .eq("property_id", propertyId)
+      .in("rate_plan_id", planIds)
+      .gte("date", dates[0])
+      .lte("date", dates[dates.length - 1])
+      .range(off, off + 999);
+    if (error) return NextResponse.json({ error: `Reading ari: ${error.message}` }, { status: 500 });
+    for (const row of page ?? []) current.set(`${row.rate_plan_id}|${row.date}`, Number(row.rate));
+    if (!page || page.length < 1000) break;
+  }
+
+  const changed = resolved.filter((r) => current.get(`${r.rate_plan_id}|${r.date}`) !== r.rate);
+  const unchanged = resolved.length - changed.length;
+
+  let applied = 0;
+  for (let i = 0; i < changed.length; i += 500) {
+    const batch = changed.slice(i, i + 500).map((r) => ({
+      property_id: propertyId,
+      room_type_id: r.room_type_id,
+      rate_plan_id: r.rate_plan_id,
+      date: r.date,
+      rate: r.rate,
+    }));
+    const { error } = await supabase.from("ari").upsert(batch, { onConflict: "room_type_id,rate_plan_id,date" });
+    if (error) { errors.push(`upsert: ${error.message}`); break; }
+    applied += batch.length;
+  }
+
+  return NextResponse.json({ applied, unchanged, skipped: rows.length - resolved.length, errors });
+}

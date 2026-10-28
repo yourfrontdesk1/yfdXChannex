@@ -21,6 +21,7 @@ export type Property = {
    */
   use_direct_forward?: boolean | null;
   pull_window_until?: string | null;
+  managed_pricing?: boolean | null;
   is_active: boolean;
 };
 

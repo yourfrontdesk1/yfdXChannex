@@ -29,8 +29,10 @@ export async function pricesReady(propertyId: string): Promise<{ ready: boolean;
     const r = byRt.get(rt.id as string);
     if (!r) { bad.push(`${rt.name}: no price fence`); continue; }
     if (!r.is_active) { bad.push(`${rt.name}: fence switched off`); continue; }
-    const floor = Number(r.floor_rate), base = Number(r.base_rate), ceiling = Number(r.ceiling_rate);
-    if (floor === base && base === ceiling) { bad.push(`${rt.name}: placeholder (floor = base = ceiling = ${floor})`); continue; }
+    // A deliberate flat rate (floor = base = ceiling at a real value) is valid:
+    // YourFrontDesk owns pricing and the hub is a pipe, so it is only guarded
+    // against an unset or zero rate, not against a fence that does not vary.
+    if (!(Number(r.base_rate) > 0)) { bad.push(`${rt.name}: no rate set`); continue; }
   }
   return bad.length ? { ready: false, reason: `prices not set: ${bad.join("; ")}` } : { ready: true, reason: "" };
 }
@@ -235,7 +237,15 @@ function portalClient() {
 export async function priceAll(horizon: Horizon): Promise<(PricingResult | { property_id: string; error: string })[]> {
   const results: (PricingResult | { property_id: string; error: string })[] = [];
   const all = await roomsByProperty();
+  // Skip any property whose pricing YourFrontDesk owns (managed_pricing = false):
+  // the hub is a pipe for it and must never overwrite the rates YFD sends.
+  const { data: unmanaged } = await db()
+    .from("properties")
+    .select("id")
+    .eq("managed_pricing", false);
+  const skip = new Set((unmanaged ?? []).map((p) => p.id as string));
   for (const propertyId of Object.keys(all)) {
+    if (skip.has(propertyId)) continue;
     try {
       results.push(await priceProperty(propertyId, horizon, Object.values(all[propertyId]).flat()));
     } catch (e) {
