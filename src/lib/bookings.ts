@@ -259,9 +259,18 @@ const OTA_PREFIX: Record<string, string> = {
  * booking rather than creating a rival to it.
  */
 function externalRefFor(revision: BookingRevision, revisionId: string): string {
-  const raw = revision.ota_reservation_code ?? revision.unique_id ?? revision.booking_id ?? revisionId;
-  const prefix = OTA_PREFIX[String(revision.ota_name ?? "").toLowerCase().replace(/\s+/g, "")];
-  return prefix && !String(raw).includes("-") ? `${prefix}-${raw}` : String(raw);
+  const raw = String(revision.ota_reservation_code ?? revision.unique_id ?? revision.booking_id ?? revisionId);
+  const ota = String(revision.ota_name ?? "").toLowerCase().replace(/\s+/g, "");
+  // Hotelbeds is the exception: Channex hands over "102-21517073", which already
+  // contains a "-", but the estate keys it "HBD-1114132-102-21517073". Without
+  // this, a re-issue's cancel (old ref) never matched the portal row, leaving
+  // the old booking pending while the new ref created a double on another flat.
+  if (ota === "hotelbeds") {
+    return raw.startsWith("HBD-") ? raw : `HBD-1114132-${raw}`;
+  }
+  // Other OTAs arrive as a bare number; prefix unless it already carries one.
+  const prefix = OTA_PREFIX[ota];
+  return prefix && !raw.includes("-") ? `${prefix}-${raw}` : raw;
 }
 
 /**
