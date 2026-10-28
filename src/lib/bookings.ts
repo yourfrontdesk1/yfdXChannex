@@ -3,6 +3,7 @@ import { channexRequest } from "./channex";
 import { addDays } from "./dates";
 import { applyEffectChange, holdKey, type Effect } from "./holds";
 import { pickFreeApartment } from "./parkside";
+import { systemAlert } from "./alert";
 import type { Property, RoomType } from "./types";
 
 /**
@@ -1138,7 +1139,7 @@ export async function retryUnforwarded(limit = 20): Promise<RetryResult> {
   // forwardDirect are idempotent on a re-send, so retrying a cancel is safe.
   const { data: stuck, error } = await supabase
     .from("inbound_bookings")
-    .select("id, property_id, payload, status, received_at")
+    .select("id, property_id, payload, status, received_at, ota_reservation_code")
     .is("forwarded_at", null)
     .not("property_id", "is", null)
     .gte("received_at", cutover)
@@ -1168,6 +1169,32 @@ export async function retryUnforwarded(limit = 20): Promise<RetryResult> {
         .eq("id", row.id as string)
         .maybeSingle();
       if (after?.forward_error) result.errors.push(after.forward_error as string);
+      // A reservation the hub cannot file is invisible to everyone unless a
+      // person is told; the portal cannot alert on a forward that never
+      // arrives, so the alarm lives here with the sender. Raise it only once
+      // the failure has outlasted a couple of retry cycles (received over 20
+      // minutes ago, and this cron runs every 10), and never during a bulk
+      // pull, where not-yet-filed is expected and being drained. system-alert
+      // dedupes per key every 6h, so one stuck booking emails Leon once per 6h.
+      const pulling =
+        property.pull_window_until != null &&
+        new Date(property.pull_window_until).getTime() > Date.now();
+      const stale = Date.now() - new Date(row.received_at as string).getTime() > 20 * 60 * 1000;
+      if (!pulling && stale) {
+        const ref = (row.ota_reservation_code as string | null) ?? (row.id as string);
+        await systemAlert([
+          {
+            key: `forward_failed:${ref}`,
+            title: `Reservation ${ref} has not filed`,
+            lines: [
+              after?.forward_error
+                ? String(after.forward_error)
+                : "The hub could not file this reservation downstream.",
+              "It has failed to reach the portal or YourFrontDesk for over 20 minutes and is being retried every 10 minutes.",
+            ],
+          },
+        ]);
+      }
     }
   }
 

@@ -17,8 +17,14 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
   if (!url || !key) throw new Error("PORTAL_SUPABASE_URL and PORTAL_SERVICE_ROLE_KEY are not set");
   const portal = createClient(url, key, { auth: { persistSession: false } });
 
-  const rooms = Object.values(await roomsByProperty()).flatMap((t) => Object.values(t).flat());
+  const byProperty = await roomsByProperty();
+  const rooms = Object.values(byProperty).flatMap((t) => Object.values(t).flat());
   if (!rooms.length) return out;
+  // room_number -> hub property id, so each mirrored booking carries the hub
+  // property it belongs to and YourFrontDesk can scope it and stamp freshness.
+  const hubByRoom = new Map<string, string>();
+  for (const [hubPropertyId, types] of Object.entries(byProperty))
+    for (const list of Object.values(types)) for (const r of list as string[]) hubByRoom.set(r, hubPropertyId);
   const { data: flats } = await portal.from("properties").select("id, room_number").in("room_number", rooms);
   const roomOf = new Map((flats ?? []).map((f) => [f.id as string, f.room_number as string]));
 
@@ -46,17 +52,21 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
 
   const batch = [];
   for (const b of bookings ?? []) {
-    if (!b.external_ref) continue;
+    // A portal row with no channel reference (a staff block, a closure, a
+    // cancelled direct booking) still belongs in YourFrontDesk. File it under
+    // portal:<id>, which YFD already accepts, instead of skipping it.
+    const ref = b.external_ref ?? `portal:${b.id}`;
     out.considered++;
     const stay = `${b.property_id}|${b.check_in}|${b.check_out}`;
-    if (/^LH/i.test(String(b.external_ref)) && channelStay.has(stay)) { out.duplicates++; continue; }
+    if (/^LH/i.test(String(ref)) && channelStay.has(stay)) { out.duplicates++; continue; }
     const g = (b.guest ?? {}) as { first_name?: string; last_name?: string; email?: string; phone?: string };
     // Cancelled on the channel counts as cancelled here, even where the portal
     // never heard: lynsey corrie was cancelled on Booking.com in June and still
     // sat active in the portal in October.
     const isLive = b.is_active && b.status !== "cancelled" && String(b.ota_status ?? "").toLowerCase() !== "cancelled";
     batch.push({
-      external_ref: b.external_ref,
+      external_ref: ref,
+      hub_property_id: hubByRoom.get(roomOf.get(b.property_id as string) ?? "") ?? null,
       room: roomOf.get(b.property_id as string),
       check_in: b.check_in,
       check_out: b.check_out,

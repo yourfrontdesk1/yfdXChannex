@@ -5,7 +5,10 @@ import { fetchFeed, ingestRevision } from "@/lib/bookings";
 import { runJob } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// The feed can hold hundreds after a pull, and each revision forwards to the
+// portal and files to YourFrontDesk, so one run needs well over a minute to
+// drain a backlog. 300s is the plan's ceiling on the default runtime.
+export const maxDuration = 300;
 
 /**
  * The recovery path. Webhooks are the primary route in, but the feed only ever

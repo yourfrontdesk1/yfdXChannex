@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { roomsByProperty, syncAvailability } from "@/lib/parkside";
 import { flushProperty } from "@/lib/outbox";
-import { runJob } from "@/lib/ops";
+import { runJob, record } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -70,16 +70,25 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
   }
 
+  // Every call is logged, matched or not, so "did the portal's ping reach us"
+  // has an answer. An unmatched room (one the hub does not sell) used to return
+  // here writing nothing, so a ping for e.g. 11.09 left no trace at all.
+  const started = Date.now();
+  const ping = (detail: Record<string, unknown>) =>
+    record("staff-sync-ping", started, true, detail).catch(() => undefined);
+
   let body: StaffSyncBody = {};
   try {
     body = (await request.json()) as StaffSyncBody;
   } catch {
     // An empty or malformed body means nothing to resolve; say so and stop.
+    await ping({ matched: false, note: "No JSON body" });
     return NextResponse.json({ ok: true, matched: false, note: "No JSON body" });
   }
 
   const room = typeof body.room === "string" ? body.room.trim() : "";
   if (!room) {
+    await ping({ matched: false, reason: body.reason ?? null, note: "No room given" });
     return NextResponse.json({ ok: true, matched: false, note: "No room given" });
   }
 
@@ -87,8 +96,10 @@ export async function POST(request: Request) {
     const propertyId = await propertyOwning(room);
     // A room we do not sell: nothing to recompute, and not an error.
     if (!propertyId) {
+      await ping({ matched: false, room, reason: body.reason ?? null });
       return NextResponse.json({ ok: true, matched: false, room });
     }
+    await ping({ matched: true, room, property_id: propertyId, reason: body.reason ?? null });
 
     const { sync, flush } = await runJob("staff-sync", async () => {
       const sync = await syncAvailability(propertyId);
