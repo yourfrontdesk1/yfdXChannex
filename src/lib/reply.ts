@@ -73,6 +73,14 @@ const HARD_ESCALATION = [
 /** No thread gets answered more often than this, so nothing can loop. */
 const MIN_SECONDS_BETWEEN_REPLIES = 30;
 const MAX_REPLIES_PER_THREAD_PER_DAY = 8;
+// A guest often sends a thought across two or three messages seconds apart. The
+// webhook fires a run per message, so without this each line raced to its own
+// reply (Hannah Keddie wrote twice ten seconds apart and got two answers). A
+// thread whose newest line is younger than this is still settling: skip it this
+// run and let a later run, once the burst is quiet, answer the whole thing once.
+// The webhook waits this long before it fires, and the two minute batch is the
+// backstop for a lone message whose webhook run skipped it.
+export const REPLY_DEBOUNCE_SECONDS = 20;
 
 /**
  * Only thanks and pleasantries: short, no question, nothing asked for. Anything
@@ -152,7 +160,7 @@ async function escalate(threadId: string, bookingId: string | null, reason: stri
 
 export type ReplyResult = {
   considered: number; answered: number; skipped_no_booking: number;
-  escalated: number; rate_limited: number; failed: number; errors: string[];
+  escalated: number; rate_limited: number; debounced: number; failed: number; errors: string[];
 };
 
 /**
@@ -214,7 +222,7 @@ async function askHere(context: string, text: string, key: string): Promise<stri
 
 export async function answerPendingMessages(): Promise<ReplyResult> {
   const supabase = db();
-  const result: ReplyResult = { considered: 0, answered: 0, skipped_no_booking: 0, escalated: 0, rate_limited: 0, failed: 0, errors: [] };
+  const result: ReplyResult = { considered: 0, answered: 0, skipped_no_booking: 0, escalated: 0, rate_limited: 0, debounced: 0, failed: 0, errors: [] };
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error("ANTHROPIC_API_KEY is not set");
 
@@ -244,6 +252,17 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
     const threadMsgIds = threadMsgs.map((m) => m.id as string);
     const markHandled = () =>
       supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).in("id", threadMsgIds);
+
+    // Debounce: if the newest line arrived within the window, the guest may still
+    // be typing the rest of the thought. Leave the whole thread untouched (not
+    // claimed, not handled) so the run that fires once it is quiet answers it in
+    // one reply. This is what actually stops the double reply, because the two
+    // runs that a burst triggers no longer each answer a line the other missed.
+    const newest = message.received_at ? Date.parse(message.received_at as string) : 0;
+    if (newest && (Date.now() - newest) / 1000 < REPLY_DEBOUNCE_SECONDS) {
+      result.debounced++;
+      continue;
+    }
 
     // Per-thread lock: claim the latest line. A claim older than two minutes is a
     // dead run and can be retaken. Claiming the latest keeps two runs off a thread.
