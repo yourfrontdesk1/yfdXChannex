@@ -1,11 +1,14 @@
 import { NextResponse, after } from "next/server";
-import { answerPendingMessages } from "@/lib/reply";
+import { answerPendingMessages, REPLY_DEBOUNCE_SECONDS } from "@/lib/reply";
 import { runJob, enabled } from "@/lib/ops";
 import { authorised } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { mirrorToYourFrontDesk } from "@/lib/mirror";
 
 export const dynamic = "force-dynamic";
+// after() waits out the reply debounce and then the model call, so the function
+// must stay alive well past the webhook's own 200.
+export const maxDuration = 120;
 
 const MESSAGE_EVENTS = new Set(["message", "message_new", "new_message", "guest_message"]);
 const REVIEW_EVENTS = new Set(["review", "review_new", "new_review", "guest_review"]);
@@ -66,10 +69,16 @@ export async function POST(request: Request) {
           { kind: "message", sender: "guest", content: text, sent_at: (payload.inserted_at ?? payload.sent_at ?? null) as string | null, message_id: id ?? null },
         );
       }
-      // Answered now, not at the next two minute run. after() lets Channex have
-      // its 200 straight away while the reply is written and sent.
+      // Answered without waiting for the two minute run, but not instantly:
+      // after() lets Channex have its 200 straight away, then we wait out the
+      // debounce before answering. A guest who sends three lines in ten seconds
+      // fires three of these; each waits, and answerPendingMessages skips any
+      // thread still inside the window, so only the run after the last line
+      // answers, and it answers the whole burst in one reply. A lone message is
+      // answered about REPLY_DEBOUNCE_SECONDS after it lands.
       if (text && fromGuest) {
         after(async () => {
+          await new Promise((r) => setTimeout(r, REPLY_DEBOUNCE_SECONDS * 1000));
           if (await enabled("auto_reply_enabled")) await runJob("answer-messages", answerPendingMessages).catch(() => null);
         });
       }
