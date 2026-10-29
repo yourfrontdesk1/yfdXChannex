@@ -81,6 +81,29 @@ export async function POST(request: Request) {
   }
   threadId = sent.threadId ?? threadId;
 
+  // Record the send in the hub's own message log. Until now only auto-replies
+  // wrote an outbound row, so a message composed in YourFrontDesk or sent by
+  // hand left no trace here: it made Sara's delivered confirmation look missing
+  // in an audit and nearly got it resent. channex_message_id is unique, so a
+  // mirror of the same send back from YourFrontDesk collapses onto this row
+  // rather than doubling; sender "yfd" marks where it came from. Never fatal.
+  try {
+    const bareRef = externalRef ? externalRef.replace(/^[A-Z]{3}-/, "") : null;
+    await db().from("guest_messages").insert({
+      channex_message_id: sent.messageId,
+      thread_id: threadId || null,
+      channex_booking_id: bookingId,
+      ota_reservation_code: bareRef,
+      direction: "outbound",
+      sender: "yfd",
+      body: message,
+      sent_at: new Date().toISOString(),
+      forwarded_at: new Date().toISOString(),
+    });
+  } catch {
+    // The message is sent; a missing log row must not fail the send.
+  }
+
   // Stamped here rather than in YourFrontDesk, because this is the moment it
   // actually left. A booking whose link was sent twice is a guest who thinks
   // something went wrong.

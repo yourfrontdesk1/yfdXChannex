@@ -21,16 +21,16 @@ export async function sendGuestMessage(opts: {
   bookingId?: string | null;
   text: string;
   propertyId?: string | null;
-}): Promise<{ ok: boolean; threadId: string | null; error: string | null }> {
+}): Promise<{ ok: boolean; threadId: string | null; messageId: string | null; error: string | null }> {
   const body = { message: { message: opts.text } };
   const path = opts.threadId
     ? `/message_threads/${opts.threadId}/messages`
     : opts.bookingId
       ? `/bookings/${opts.bookingId}/messages`
       : null;
-  if (!path) return { ok: false, threadId: null, error: "Neither a thread nor a booking to send to" };
+  if (!path) return { ok: false, threadId: null, messageId: null, error: "Neither a thread nor a booking to send to" };
 
-  const res = await channexRequest<{ data?: { relationships?: { message_thread?: { data?: { id?: string } } } } }>(
+  const res = await channexRequest<{ data?: { id?: string; relationships?: { message_thread?: { data?: { id?: string } } } } }>(
     "POST",
     path,
     body,
@@ -43,7 +43,8 @@ export async function sendGuestMessage(opts: {
         : res.status === 422
           ? "Channex refused: this booking's channel does not take messages"
           : res.error ?? `Channex returned ${res.status}`;
-    return { ok: false, threadId: opts.threadId ?? null, error: reason };
+    return { ok: false, threadId: opts.threadId ?? null, messageId: null, error: reason };
   }
-  return { ok: true, threadId: res.body?.data?.relationships?.message_thread?.data?.id ?? opts.threadId ?? null, error: null };
+  // The Channex message id, so the caller can record the send and dedupe on it.
+  return { ok: true, threadId: res.body?.data?.relationships?.message_thread?.data?.id ?? opts.threadId ?? null, messageId: res.body?.data?.id ?? null, error: null };
 }
