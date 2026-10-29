@@ -56,6 +56,9 @@ provisions a property over the API. It is fine for one-off provisioning. It is
   before activating rather than guessing.
 - Channex creates no Booking.com property. The listing is made by hand in the
   extranet, and that is not a gap in our integration.
+- Expedia mappings: room_type_code MUST be an integer (Channex support, 29 Oct);
+  rate_plan_code stays a string (e.g. 408572524A). Booking.com room codes stay
+  strings. The hub has no Expedia builder, so a hand remap must honour this.
 
 ## Working with Leon
 
