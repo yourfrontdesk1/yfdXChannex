@@ -52,6 +52,9 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
 
   const batch = [];
   for (const b of bookings ?? []) {
+    // Test rows are portal only and must never reach YourFrontDesk: it maps kind
+    // "test" to guest, so e.g. TEST-WALK-2810 would show as a real guest stay.
+    if (b.kind === "test") continue;
     // A portal row with no channel reference (a staff block, a closure, a
     // cancelled direct booking) still belongs in YourFrontDesk. File it under
     // portal:<id>, which YFD already accepts, instead of skipping it.
@@ -152,9 +155,11 @@ export async function mirrorPortalBookingsForRoom(room: string): Promise<{ consi
 
   const batch = [];
   for (const b of bookings ?? []) {
+    // Test rows are portal only and must never reach YourFrontDesk (it maps kind
+    // "test" to guest, showing a real guest stay).
+    if (b.kind === "test") continue;
     const ref = b.external_ref ?? `portal:${b.id}`;
     out.considered++;
-    if (/^LH/i.test(String(ref)) && channelStay.has(`${b.property_id}|${b.check_in}|${b.check_out}`)) continue;
     const g = (b.guest ?? {}) as { first_name?: string; last_name?: string; email?: string; phone?: string };
     const isLive = b.is_active && b.status !== "cancelled" && String(b.ota_status ?? "").toLowerCase() !== "cancelled";
     batch.push({
