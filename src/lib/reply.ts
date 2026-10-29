@@ -165,7 +165,7 @@ export type ReplyResult = {
 async function askDownstream(
   booking: { ota_reservation_code?: string | null; guest_name?: string | null; property_id?: string | null },
   text: string,
-  extra: { history?: { from: string; text: string; at: string }[]; kind?: "pleasantry" } = {},
+  extra: { history?: { from: string; text: string; at: string }[]; kind?: "pleasantry"; holding?: boolean } = {},
 ): Promise<string | null> {
   const base = process.env.DOWNSTREAM_REPLY_URL;
   const secret = process.env.DOWNSTREAM_SECRET;
@@ -176,7 +176,10 @@ async function askDownstream(
       method: "POST",
       headers: { "content-type": "application/json", "x-channex-webhook-secret": secret },
       // hub_property_id lets YourFrontDesk scope the owner the booking belongs to.
-      body: JSON.stringify({ external_ref: ref, message: text, guest_name: booking.guest_name ?? null, hub_property_id: booking.property_id ?? null, history: extra.history ?? [], kind: extra.kind ?? null }),
+      // holding:true asks YourFrontDesk for a short "a person is on it" line to
+      // tide the guest over while their thread sits with a human. It returns a
+      // line, or escalate again (e.g. a do-not-contact ref), which the caller honours.
+      body: JSON.stringify({ external_ref: ref, message: text, guest_name: booking.guest_name ?? null, hub_property_id: booking.property_id ?? null, history: extra.history ?? [], kind: extra.kind ?? null, holding: extra.holding ?? false }),
     });
     if (!res.ok) return null;
     const body = (await res.json()) as { reply?: string; escalate?: boolean; reason?: string; technical?: boolean };
@@ -217,19 +220,33 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
 
   const { data: pending, error } = await supabase
     .from("guest_messages")
-    .select("id, thread_id, channex_booking_id, body, sender, direction, received_at")
+    .select("id, thread_id, channex_booking_id, body, sender, direction, received_at, raw")
     .is("forwarded_at", null)
     .eq("direction", "inbound")
-    .not("body", "is", null)
     .order("received_at", { ascending: true })
-    .limit(10);
+    .limit(40);
   if (error) throw new Error(`Reading messages: ${error.message}`);
 
-  for (const message of pending ?? []) {
-    // Claimed first. The webhook now answers the moment a message lands and the
-    // two minute job still runs as the backup; without a claim both could answer
-    // the same message. A claim older than two minutes is a run that died, so it
-    // can be taken again.
+  // One reply per THREAD per run. YourFrontDesk's reply answers every unanswered
+  // line since the last reply in a single message, so acting once per line sent
+  // two replies a second apart. Group by thread, act on the latest line, and
+  // mark the whole thread's unanswered lines handled together.
+  const byThread = new Map<string, NonNullable<typeof pending>>();
+  for (const m of pending ?? []) {
+    const t = (m.thread_id as string | null) ?? (m.id as string);
+    const list = byThread.get(t) ?? [];
+    list.push(m);
+    byThread.set(t, list);
+  }
+
+  for (const [threadId, threadMsgs] of byThread) {
+    const message = threadMsgs[threadMsgs.length - 1]; // the latest unanswered line
+    const threadMsgIds = threadMsgs.map((m) => m.id as string);
+    const markHandled = () =>
+      supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).in("id", threadMsgIds);
+
+    // Per-thread lock: claim the latest line. A claim older than two minutes is a
+    // dead run and can be retaken. Claiming the latest keeps two runs off a thread.
     const stale = new Date(Date.now() - 120000).toISOString();
     const { data: claimed } = await supabase
       .from("guest_messages")
@@ -239,140 +256,118 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
       .select("id");
     if (!claimed?.length) continue;
     result.considered++;
-    const threadId = message.thread_id as string;
     const bookingId = (message.channex_booking_id as string) ?? null;
     const text = (message.body as string) ?? "";
 
-    // A thread already handed to a person stays with them.
-    const { data: openEscalations } = await supabase
-      .from("escalations")
-      .select("id")
-      .eq("thread_id", threadId)
-      .is("resolved_at", null)
-      .limit(1);
-    if (openEscalations?.length) {
-      // Their next message goes to the same people, on the Replies page and by
-      // email. It used to be marked done and dropped: Yasser Alhoussainy asked
-      // for an invoice on 18 October and nobody ever saw it.
-      await mirrorToYourFrontDesk({ channexBookingId: bookingId }, {
-        kind: "escalation",
-        guest_message: text,
-        reason: "they wrote again while their earlier message is still waiting for you",
-      });
-      await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
-      result.escalated++;
-      continue;
-    }
-
-    // Words that never get an automated answer, whatever a model thinks.
-    const lowered = text.toLowerCase();
-    if (HARD_ESCALATION.some((word) => lowered.includes(word))) {
-      await escalate(threadId, bookingId, "wording that needs a person", text);
-      await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
-      result.escalated++;
-      continue;
-    }
-
-    // A thank you, or "looking forward to it", needs no model and never a
-    // person. On 7 October the AI was out of credit and a guest's thank you was
-    // emailed to Leon as needing him. Answered here, warmly, whatever the AI is doing.
-    if (isPleasantry(text)) {
-      const { data: stay } = await supabase
-        .from("inbound_bookings")
-        .select("guest_name, arrival_date, payload")
-        .eq("channex_booking_id", bookingId as string)
-        .order("received_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      // The assistant writes it, so "the trip is for my 60th birthday" gets a
-      // happy birthday and not the same line twice. The fixed lines are only the
-      // fallback, and a thank you is never handed to a person.
-      const { data: refRow } = await supabase
-        .from("inbound_bookings")
-        .select("ota_reservation_code, guest_name, departure_date, property_id")
-        .eq("channex_booking_id", bookingId as string)
-        .order("received_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      const written = refRow
-        ? await askDownstream(refRow, text, { history: await threadHistory(threadId).catch(() => []), kind: "pleasantry" })
-        : null;
-      const reply = written && !written.trim().toUpperCase().startsWith("ESCALATE")
-        ? written.trim()
-        : pleasantryReply(
-          ((stay?.payload as { customer?: { name?: string } } | null)?.customer?.name ?? String(stay?.guest_name ?? "").split(" ")[0]) || "",
-          (stay?.arrival_date as string | null) ?? null,
-          message.id as string,
-          (refRow?.departure_date as string | null) ?? null,
-        );
-      const sentThanks = await sendGuestMessage({ threadId, bookingId, text: reply });
-      if (sentThanks.ok) {
-        await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
-        await mirrorToYourFrontDesk({ channexBookingId: bookingId }, { kind: "message", sender: "host", content: reply });
-        result.answered++;
-        continue;
-      }
-    }
-
-    // Nothing can run away with itself.
-    const dayAgo = new Date(Date.now() - 86400000).toISOString();
-    const { data: recent } = await supabase
-      .from("guest_messages")
-      .select("received_at")
-      .eq("thread_id", threadId)
-      .eq("direction", "outbound")
-      .gte("received_at", dayAgo)
-      .order("received_at", { ascending: false });
-    const lastOut = recent?.[0]?.received_at as string | undefined;
-    const tooSoon = lastOut ? (Date.now() - Date.parse(lastOut)) / 1000 < MIN_SECONDS_BETWEEN_REPLIES : false;
-    if (tooSoon || (recent?.length ?? 0) >= MAX_REPLIES_PER_THREAD_PER_DAY) {
-      result.rate_limited++;
-      continue;
-    }
-
+    // Resolve the booking once: its channel, ref and context.
     const { data: booking } = await supabase
       .from("inbound_bookings")
-      .select("guest_name, arrival_date, departure_date, portal_url, status, ota_reservation_code, property_id")
-      .eq("channex_booking_id", message.channex_booking_id as string)
-      // A booking has a row per revision. Without this a modified booking
-      // returned several, maybeSingle gave nothing, and the guest went unanswered.
+      .select("guest_name, arrival_date, departure_date, portal_url, status, ota_reservation_code, ota_name, payload, property_id")
+      .eq("channex_booking_id", bookingId as string)
       .order("received_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    // No booking behind the thread means no facts to answer with. Hand it to a
-    // person in YourFrontDesk instead of dropping it silently: the skip used to
-    // just continue, so a guest whose booking the hub could not resolve went
-    // unanswered with nobody told.
-    if (!booking?.portal_url) {
-      await escalate(threadId, bookingId, "no booking record behind the thread, needs a person", text);
-      await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
-      result.skipped_no_booking++;
-      result.escalated++;
+    // Expedia and Hotelbeds take no guest messages through Channex (a send 422s).
+    // The message is already mirrored to YourFrontDesk on arrival and its
+    // watchdog hands it to a person, so here we only mark it handled: no reply,
+    // no holding line.
+    const otaName = String(booking?.ota_name ?? "").toLowerCase();
+    if (otaName === "expedia" || otaName === "hotelbeds") {
+      await markHandled();
       continue;
     }
 
-    const context = `This guest is ${booking.guest_name ?? "a guest"}. They arrive ${booking.arrival_date} and leave ${booking.departure_date}. Their guest portal link, the only link you may ever send them, is ${booking.portal_url}. Everything about their stay, payment, check in, door code and WiFi, appears there.`;
+    // An attachment (a photo) has no body. Forward it to YourFrontDesk as a
+    // message carrying the image so a person can see it, then mark it handled.
+    const attachments = (message.raw as { attachments?: string[] } | null)?.attachments ?? [];
+    if (!text.trim()) {
+      if (attachments.length) {
+        const urls = attachments.map((a) => `https://app.channex.io/${a}`).join(" ");
+        await mirrorToYourFrontDesk({ channexBookingId: bookingId }, { kind: "message", sender: "guest", content: `Guest sent an attachment: ${urls}` });
+      }
+      await markHandled();
+      continue;
+    }
 
     try {
-      // YourFrontDesk answers, because that is where the reservation lives and
-      // where the knowledge about the guest's actual apartment is kept: its own
-      // door code rules, its WiFi, the pool pass, the bin store. This service
-      // keeps a brain of its own only as a fallback, for the case where the
-      // downstream is unreachable and silence would be worse than a general answer.
-      const history = await threadHistory(threadId).catch(() => []);
-      const answer = await askDownstream(booking, text, { history }) ?? await askHere(context, text, key);
-      if (!answer) {
-        result.failed++;
-        result.errors.push("Neither YourFrontDesk nor the fallback produced an answer");
+      // A thank you, or "looking forward to it", needs no model and never a person.
+      if (isPleasantry(text)) {
+        const name = ((booking?.payload as { customer?: { name?: string } } | null)?.customer?.name ?? String(booking?.guest_name ?? "").split(" ")[0]) || "";
+        const written = booking
+          ? await askDownstream(booking, text, { history: await threadHistory(threadId).catch(() => []), kind: "pleasantry" })
+          : null;
+        const reply = written && !written.trim().toUpperCase().startsWith("ESCALATE")
+          ? written.trim()
+          : pleasantryReply(name, (booking?.arrival_date as string | null) ?? null, message.id as string, (booking?.departure_date as string | null) ?? null);
+        const sentThanks = await sendGuestMessage({ threadId, bookingId, text: reply });
+        if (sentThanks.ok) {
+          await mirrorToYourFrontDesk({ channexBookingId: bookingId }, { kind: "message", sender: "host", content: reply });
+          await markHandled();
+          result.answered++;
+          continue;
+        }
+      }
+
+      // Words that never get an automated answer, whatever a model thinks.
+      if (HARD_ESCALATION.some((word) => text.toLowerCase().includes(word))) {
+        await escalate(threadId, bookingId, "wording that needs a person", text);
+        await markHandled();
+        result.escalated++;
         continue;
       }
 
-      // The model's own hand over signal.
+      // Nothing can run away with itself.
+      const dayAgo = new Date(Date.now() - 86400000).toISOString();
+      const { data: recent } = await supabase
+        .from("guest_messages")
+        .select("received_at")
+        .eq("thread_id", threadId)
+        .eq("direction", "outbound")
+        .gte("received_at", dayAgo)
+        .order("received_at", { ascending: false });
+      const lastOut = recent?.[0]?.received_at as string | undefined;
+      const tooSoon = lastOut ? (Date.now() - Date.parse(lastOut)) / 1000 < MIN_SECONDS_BETWEEN_REPLIES : false;
+      if (tooSoon || (recent?.length ?? 0) >= MAX_REPLIES_PER_THREAD_PER_DAY) {
+        result.rate_limited++;
+        continue;
+      }
+
+      // Ask YourFrontDesk, which owns the reservation and reads the live portal
+      // (payment state, ID counts). Even on a thread with an open escalation we
+      // STILL ask it rather than blindly re-escalating: it answers e.g. a payment
+      // confirmation, and returns escalate itself when a person is truly needed.
+      const history = await threadHistory(threadId).catch(() => []);
+      const context = booking?.portal_url
+        ? `This guest is ${booking.guest_name ?? "a guest"}. They arrive ${booking.arrival_date} and leave ${booking.departure_date}. Their guest portal link, the only link you may ever send them, is ${booking.portal_url}. Everything about their stay, payment, check in, door code and WiFi, appears there.`
+        : "";
+      const answer = (booking?.ota_reservation_code ? await askDownstream(booking, text, { history }) : null) ?? (context ? await askHere(context, text, key) : null);
+      if (!answer) {
+        // No reservation to answer from and no fallback context: a person takes it.
+        await escalate(threadId, bookingId, "no booking record behind the thread, needs a person", text);
+        await markHandled();
+        result.skipped_no_booking++;
+        result.escalated++;
+        continue;
+      }
+
+      // YourFrontDesk's hand-over signal.
       if (answer.trim().toUpperCase().startsWith("ESCALATE")) {
         const why = answer.trim().slice("ESCALATE".length).replace(/^:/, "").trim();
-        await escalate(threadId, bookingId, why || "the assistant would not answer it", message.body as string);
-        await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
+        await escalate(threadId, bookingId, why || "the assistant would not answer it", text);
+        // Reassure the guest a person is on it, except for a do-not-contact ref
+        // (its holding call also returns escalate, so nothing would send anyway).
+        if (booking && !/no.?contact/i.test(why)) {
+          const holding = await askDownstream(booking, text, { history, holding: true });
+          if (holding && !holding.trim().toUpperCase().startsWith("ESCALATE")) {
+            const h = await sendGuestMessage({ threadId, bookingId, text: holding.trim() });
+            if (h.ok) {
+              await mirrorToYourFrontDesk({ channexBookingId: bookingId }, { kind: "message", sender: "host", content: holding.trim() });
+              await supabase.from("guest_messages").insert({ thread_id: threadId, channex_booking_id: bookingId, direction: "outbound", sender: "Victory Suites", body: holding.trim(), forwarded_at: new Date().toISOString() });
+            }
+          }
+        }
+        await markHandled();
         result.escalated++;
         continue;
       }
@@ -383,12 +378,11 @@ export async function answerPendingMessages(): Promise<ReplyResult> {
         if (sent.error) result.errors.push(sent.error);
         continue;
       }
-      await mirrorToYourFrontDesk({ channexBookingId: message.channex_booking_id as string | null }, { kind: "message", sender: "host", content: answer.trim() });
-
-      await supabase.from("guest_messages").update({ forwarded_at: new Date().toISOString() }).eq("id", message.id as string);
+      await mirrorToYourFrontDesk({ channexBookingId: bookingId }, { kind: "message", sender: "host", content: answer.trim() });
+      await markHandled();
       await supabase.from("guest_messages").insert({
-        thread_id: message.thread_id,
-        channex_booking_id: message.channex_booking_id,
+        thread_id: threadId,
+        channex_booking_id: bookingId,
         direction: "outbound",
         sender: "Victory Suites",
         body: answer.trim(),
