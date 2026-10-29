@@ -31,7 +31,7 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
   const today = new Date().toISOString().slice(0, 10);
   const { data: bookings, error } = await portal
     .from("bookings")
-    .select("id, external_ref, property_id, check_in, check_out, status, is_active, ota_status, created_at, ota_created_at, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
+    .select("id, external_ref, property_id, kind, check_in, check_out, status, is_active, ota_status, created_at, ota_created_at, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
     .in("property_id", [...roomOf.keys()])
     .gte("check_out", today);
   if (error) throw new Error(`Portal bookings: ${error.message}`);
@@ -83,6 +83,11 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
       payment_link: b.payment_link ?? null,
       link_sent_at: b.portal_link_sent_at ?? null,
       portal_booking_id: b.id,
+      // The portal's own classification (guest, maintenance, owner, block, test).
+      // Without it YourFrontDesk defaulted every mirrored row to a guest, so a
+      // maintenance block like 10.01 "Maintenance Wall fix" filed as a guest stay
+      // and was charged tourist tax. An explicit kind wins over YFD's classifier.
+      kind: b.kind ?? "guest",
       // When it was really booked, so the hourly digest does not call an old booking new.
       created_at: b.ota_created_at ?? b.created_at ?? null,
     });
@@ -133,7 +138,7 @@ export async function mirrorPortalBookingsForRoom(room: string): Promise<{ consi
   const today = new Date().toISOString().slice(0, 10);
   const { data: bookings, error } = await portal
     .from("bookings")
-    .select("id, external_ref, property_id, check_in, check_out, status, is_active, ota_status, created_at, ota_created_at, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
+    .select("id, external_ref, property_id, kind, check_in, check_out, status, is_active, ota_status, created_at, ota_created_at, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
     .in("property_id", portalIds)
     .gte("check_out", today);
   if (error) { out.errors.push(`Portal bookings: ${error.message}`); return out; }
@@ -171,6 +176,9 @@ export async function mirrorPortalBookingsForRoom(room: string): Promise<{ consi
       payment_link: b.payment_link ?? null,
       link_sent_at: b.portal_link_sent_at ?? null,
       portal_booking_id: b.id,
+      // Portal classification, so a maintenance/owner/block/test stay is not
+      // filed and taxed as a guest. An explicit kind wins over YFD's classifier.
+      kind: b.kind ?? "guest",
       created_at: b.ota_created_at ?? b.created_at ?? null,
     });
   }
