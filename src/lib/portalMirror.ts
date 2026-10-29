@@ -99,3 +99,101 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
   out.existed = body.existed ?? 0;
   return out;
 }
+
+/**
+ * Files one room's live portal bookings in YourFrontDesk the instant a staff
+ * write lands, instead of waiting up to fifteen minutes for the hourly
+ * mirrorPortalBookings. A new portal stay (a staff booking, an APP- or a
+ * DIRECT-WEB- direct booking) otherwise shows availability closed on the OTA but
+ * no guest in Check ins or the Calendar until the next sweep. The row shape and
+ * the endpoint match mirrorPortalBookings exactly, so YourFrontDesk files it the
+ * same way and dedupes on external_ref; this only makes it instant for the one
+ * room the ping named. Display only, like the hourly sweep: YFD sends nothing
+ * and emails nobody for these.
+ */
+export async function mirrorPortalBookingsForRoom(room: string): Promise<{ considered: number; sent: number; inserted: number; existed: number; errors: string[] }> {
+  const out = { considered: 0, sent: 0, inserted: 0, existed: 0, errors: [] as string[] };
+  const url = process.env.PORTAL_SUPABASE_URL, key = process.env.PORTAL_SERVICE_ROLE_KEY;
+  if (!url || !key) return out;
+  const portal = createClient(url, key, { auth: { persistSession: false } });
+
+  // The hub property that sells this room, so the mirrored row is scoped the
+  // same way the hourly sweep scopes it. A room the hub does not sell is nothing
+  // to mirror.
+  const byProperty = await roomsByProperty();
+  let hubPropertyId: string | null = null;
+  for (const [hub, types] of Object.entries(byProperty))
+    for (const list of Object.values(types)) if ((list as string[]).includes(room)) hubPropertyId = hub;
+  if (!hubPropertyId) return out;
+
+  const { data: flats } = await portal.from("properties").select("id, room_number").eq("room_number", room);
+  const portalIds = (flats ?? []).map((f) => f.id as string);
+  if (!portalIds.length) return out;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const { data: bookings, error } = await portal
+    .from("bookings")
+    .select("id, external_ref, property_id, check_in, check_out, status, is_active, ota_status, created_at, ota_created_at, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
+    .in("property_id", portalIds)
+    .gte("check_out", today);
+  if (error) { out.errors.push(`Portal bookings: ${error.message}`); return out; }
+
+  // Same Little Hotelier dedup as the hourly sweep: an LH "Direct" copy of a stay
+  // that already sits under a channel reference is skipped so nobody doubles up.
+  const live = (bookings ?? []).filter((b) => b.is_active && b.status !== "cancelled");
+  const channelStay = new Set(
+    live.filter((b) => !/^LH/i.test(String(b.external_ref ?? ""))).map((b) => `${b.property_id}|${b.check_in}|${b.check_out}`),
+  );
+
+  const batch = [];
+  for (const b of bookings ?? []) {
+    const ref = b.external_ref ?? `portal:${b.id}`;
+    out.considered++;
+    if (/^LH/i.test(String(ref)) && channelStay.has(`${b.property_id}|${b.check_in}|${b.check_out}`)) continue;
+    const g = (b.guest ?? {}) as { first_name?: string; last_name?: string; email?: string; phone?: string };
+    const isLive = b.is_active && b.status !== "cancelled" && String(b.ota_status ?? "").toLowerCase() !== "cancelled";
+    batch.push({
+      external_ref: ref,
+      hub_property_id: hubPropertyId,
+      room,
+      check_in: b.check_in,
+      check_out: b.check_out,
+      status: isLive ? "active" : "cancelled",
+      first_name: g.first_name ?? null,
+      last_name: g.last_name ?? null,
+      email: g.email ?? null,
+      phone: g.phone ?? null,
+      guests: b.num_guests ?? null,
+      amount: Number(b.balance_amount ?? 0) + Number(b.deposit_amount ?? 0) || null,
+      currency: b.currency ?? "GBP",
+      source: b.channel ?? b.booking_source ?? null,
+      portal_url: b.token ? `https://guestportal.victorysuites.gi/guest/${b.token}` : null,
+      payment_link: b.payment_link ?? null,
+      link_sent_at: b.portal_link_sent_at ?? null,
+      portal_booking_id: b.id,
+      created_at: b.ota_created_at ?? b.created_at ?? null,
+    });
+  }
+  if (!batch.length) return out;
+
+  const { data: target } = await db()
+    .from("properties")
+    .select("downstream_url, downstream_secret")
+    .not("downstream_url", "is", null)
+    .limit(1)
+    .maybeSingle();
+  if (!target?.downstream_url || !target.downstream_secret) { out.errors.push("No YourFrontDesk endpoint configured"); return out; }
+  const endpoint = (target.downstream_url as string).replace(/channex-webhook\/?$/, "channex-conversation");
+
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-channex-webhook-secret": target.downstream_secret as string },
+    body: JSON.stringify({ kind: "bookings", external_ref: "staff-sync", bookings: batch }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { inserted?: number; existed?: number; error?: string };
+  if (!res.ok) { out.errors.push(body.error ?? `YourFrontDesk ${res.status}`); return out; }
+  out.sent = batch.length;
+  out.inserted = body.inserted ?? 0;
+  out.existed = body.existed ?? 0;
+  return out;
+}

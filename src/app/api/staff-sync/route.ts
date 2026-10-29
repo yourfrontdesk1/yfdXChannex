@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { roomsByProperty, syncAvailability } from "@/lib/parkside";
 import { flushProperty } from "@/lib/outbox";
+import { mirrorPortalBookingsForRoom } from "@/lib/portalMirror";
 import { runJob, record } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
@@ -107,6 +108,13 @@ export async function POST(request: Request) {
       return { sync, flush };
     });
 
+    // File the room's live portal stays in YourFrontDesk in the same breath, so a
+    // staff booking or a direct (APP-/DIRECT-WEB-) booking shows a guest in Check
+    // ins within seconds instead of waiting up to fifteen minutes for the hourly
+    // mirror. Availability is already instant above; this makes the record
+    // instant too. Never fatal: a failed mirror must not fail the sync response.
+    const mirror = await mirrorPortalBookingsForRoom(room).catch((e) => ({ errors: [e instanceof Error ? e.message : String(e)] }));
+
     return NextResponse.json({
       ok: true,
       matched: true,
@@ -115,6 +123,7 @@ export async function POST(request: Request) {
       reason: body.reason ?? null,
       rows_changed: sync.rows_changed,
       sent: flush.sent,
+      mirrored: mirror,
     });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
