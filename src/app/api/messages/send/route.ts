@@ -3,7 +3,7 @@ import { authorised } from "@/lib/auth";
 import { sendGuestMessage } from "@/lib/messages";
 import { threadFor } from "@/lib/guest-link";
 import { db } from "@/lib/db";
-import { markPortalLinkSent } from "@/lib/portal";
+import { carriesPortalLink, channelLabel, portalRefFor, recordPortalLinkSend } from "@/lib/portal";
 import { mirrorToYourFrontDesk } from "@/lib/mirror";
 
 export const dynamic = "force-dynamic";
@@ -94,12 +94,20 @@ export async function POST(request: Request) {
       .is("link_sent_at", null);
   }
 
-  // And on the guest portal itself, so its own "Link sent" badge is true. The
-  // portal knows the booking as BDC-6276994350 whichever way it was asked. Only
-  // the first send is stamped; a later message is not a second link.
-  if (externalRef) {
-    const portalRef = /^[A-Z]{3}-/.test(externalRef) ? externalRef : `BDC-${externalRef}`;
-    await markPortalLinkSent(portalRef).catch(() => null);
+  // And on the guest portal itself, so its link count is true. Every message
+  // that carries the portal link counts: the first stamps the send, each later
+  // one (a resend) adds to the count. A reply without the link is not a send.
+  // The channel is the booking's own, read from what Channex sent.
+  if (externalRef && carriesPortalLink(message)) {
+    const { data: row } = await db()
+      .from("inbound_bookings")
+      .select("ota_name")
+      .or(`ota_reservation_code.eq.${externalRef},ota_reservation_code.eq.${externalRef.replace(/^[A-Z]{3}-/, "")}`)
+      .order("received_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const otaName = (row?.ota_name as string | null) ?? null;
+    await recordPortalLinkSend(portalRefFor(otaName, externalRef), channelLabel(otaName)).catch(() => null);
   }
 
   // The YourFrontDesk Inbox stores what it sends itself, so it asks for no copy.

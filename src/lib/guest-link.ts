@@ -1,6 +1,7 @@
 import { db } from "./db";
 import { channexRequest } from "./channex";
 import { sendGuestMessage } from "./messages";
+import { channelLabel, portalRefFor, recordPortalLinkSend } from "./portal";
 
 /**
  * Sends a new guest their portal link on the OTA's own message thread.
@@ -128,7 +129,7 @@ export async function sendPendingGuestLinks(): Promise<LinkSendResult> {
   // learns that nobody is really watching.
   const { data: revisions, error } = await supabase
     .from("inbound_bookings")
-    .select("id, revision_id, channex_booking_id, ota_reservation_code, guest_name, portal_url, status, property_id, arrival_date, departure_date, amount, currency, received_at, link_sent_at")
+    .select("id, revision_id, channex_booking_id, ota_name, ota_reservation_code, guest_name, portal_url, status, property_id, arrival_date, departure_date, amount, currency, received_at, link_sent_at")
     .gte("received_at", cutover)
     .order("received_at", { ascending: false })
     .limit(200);
@@ -196,6 +197,10 @@ export async function sendPendingGuestLinks(): Promise<LinkSendResult> {
       .from("inbound_bookings")
       .update({ link_sent_at: new Date().toISOString() })
       .eq("channex_booking_id", booking.channex_booking_id as string);
+    if (booking.ota_reservation_code) {
+      const ota = (booking.ota_name as string | null) ?? null;
+      await recordPortalLinkSend(portalRefFor(ota, String(booking.ota_reservation_code)), channelLabel(ota)).catch(() => null);
+    }
     result.sent++;
   }
 

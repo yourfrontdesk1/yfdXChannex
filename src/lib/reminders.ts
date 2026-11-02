@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { db } from "./db";
 import { sendGuestMessage } from "./messages";
 import { mirrorToYourFrontDesk } from "./mirror";
+import { channelLabel, portalRefFor, recordPortalLinkSend } from "./portal";
 
 /**
  * Reminds a guest who has not finished their check in, every two days, until
@@ -17,6 +18,9 @@ import { mirrorToYourFrontDesk } from "./mirror";
 const EVERY_DAYS = 2;
 const WITHIN_DAYS = 21;
 const DONE = new Set(["balance_paid", "checked_in"]);
+// Reminders go on the channels Leon has approved them for. Booking.com only,
+// as before; Expedia waits on his approval of the wording and channel.
+const REMIND_ON = new Set(["booking.com"]);
 
 export type ReminderResult = { considered: number; sent: number; done: number; not_due: number; failed: number; errors: string[] };
 
@@ -53,7 +57,7 @@ export async function sendReminders(): Promise<ReminderResult> {
   const until = iso(new Date(Date.now() + WITHIN_DAYS * 86400000));
   const { data: rows, error } = await hub
     .from("inbound_bookings")
-    .select("id, channex_booking_id, ota_reservation_code, guest_name, arrival_date, status, link_sent_at, last_reminder_at, portal_url, received_at, payload")
+    .select("id, channex_booking_id, ota_name, ota_reservation_code, guest_name, arrival_date, status, link_sent_at, last_reminder_at, portal_url, received_at, payload")
     .eq("status", "new")
     .not("link_sent_at", "is", null)
     .gt("arrival_date", today)
@@ -70,11 +74,14 @@ export async function sendReminders(): Promise<ReminderResult> {
     const last = Date.parse((b.last_reminder_at as string) ?? (b.link_sent_at as string));
     if (Date.now() - last < EVERY_DAYS * 86400000 - 3600000) { result.not_due++; continue; }
 
-    const ref = `BDC-${b.ota_reservation_code}`;
+    const via = channelLabel(b.ota_name as string | null);
+    if (!REMIND_ON.has(via)) continue;
+    const ref = portalRefFor(b.ota_name as string | null, String(b.ota_reservation_code));
     const { data: pb } = await portal
       .from("bookings")
-      .select("id, status, portal_step, token, portal_link_reminders")
+      .select("id, status, portal_step, token")
       .eq("external_ref", ref)
+      .limit(1)
       .maybeSingle();
     if (!pb || pb.status === "cancelled") { result.done++; continue; }
     if (DONE.has(pb.status as string) || pb.portal_step === "door-code") { result.done++; continue; }
@@ -88,7 +95,9 @@ export async function sendReminders(): Promise<ReminderResult> {
 
     const now = new Date().toISOString();
     await hub.from("inbound_bookings").update({ last_reminder_at: now }).eq("ota_reservation_code", b.ota_reservation_code as string);
-    await portal.from("bookings").update({ portal_link_reminders: Number(pb.portal_link_reminders ?? 0) + 1 }).eq("id", pb.id as string);
+    // Counted on the portal the same way as every other send: the first stamps
+    // it, each later one adds 1 to portal_link_reminders.
+    await recordPortalLinkSend(ref, via).catch(() => null);
     await mirrorToYourFrontDesk({ channexBookingId: b.channex_booking_id as string }, { kind: "message", sender: "host", content: text });
     result.sent++;
   }
