@@ -269,7 +269,10 @@ function externalRefFor(revision: BookingRevision, revisionId: string): string {
     return raw.startsWith("HBD-") ? raw : `HBD-1114132-${raw}`;
   }
   // Other OTAs arrive as a bare number; prefix unless it already carries one.
-  const prefix = OTA_PREFIX[ota];
+  // Google free booking links book on Channex's built in booking page; whatever
+  // name Channex gives that source (Google Hotel Ads, the booking page), it is
+  // ours as GGL-, never left bare or mistaken for Booking.com (Leon, 3 Nov 2026).
+  const prefix = OTA_PREFIX[ota] ?? (/google|openshopping|instantbooking|bookingengine/.test(ota) ? "GGL" : undefined);
   return prefix && !raw.includes("-") ? `${prefix}-${raw}` : raw;
 }
 
