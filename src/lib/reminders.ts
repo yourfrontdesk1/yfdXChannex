@@ -16,6 +16,13 @@ import { mirrorToYourFrontDesk } from "./mirror";
 
 const EVERY_DAYS = 2;
 const WITHIN_DAYS = 21;
+// At most this many reminders per booking (Leon, 3 Nov 2026): one guest had
+// nine. Counted from the portal's own portal_link_reminders.
+const MAX_REMINDERS = 4;
+// Sent this many at a time. One by one, 160 bookings ran past the time limit
+// and the run was killed at 09:02 every day from 30 Oct, skipping whoever was
+// left and never recording the run.
+const BATCH = 8;
 const DONE = new Set(["balance_paid", "checked_in"]);
 
 export type ReminderResult = { considered: number; sent: number; done: number; not_due: number; failed: number; errors: string[] };
@@ -63,12 +70,17 @@ export async function sendReminders(): Promise<ReminderResult> {
   const { data: cancelled } = await hub.from("inbound_bookings").select("ota_reservation_code").eq("status", "cancelled");
   const gone = new Set((cancelled ?? []).map((c) => c.ota_reservation_code));
 
-  for (const b of rows ?? []) {
-    if (gone.has(b.ota_reservation_code)) continue;
+  const live = (rows ?? []).filter((b) => !gone.has(b.ota_reservation_code));
+  for (let i = 0; i < live.length; i += BATCH) {
+    await Promise.all(live.slice(i, i + BATCH).map((b) => remindOne(b)));
+  }
+  return result;
+
+  async function remindOne(b: NonNullable<typeof rows>[number]): Promise<void> {
     result.considered++;
 
     const last = Date.parse((b.last_reminder_at as string) ?? (b.link_sent_at as string));
-    if (Date.now() - last < EVERY_DAYS * 86400000 - 3600000) { result.not_due++; continue; }
+    if (Date.now() - last < EVERY_DAYS * 86400000 - 3600000) { result.not_due++; return; }
 
     const ref = `BDC-${b.ota_reservation_code}`;
     const { data: pb } = await portal
@@ -76,15 +88,16 @@ export async function sendReminders(): Promise<ReminderResult> {
       .select("id, status, portal_step, token, portal_link_reminders")
       .eq("external_ref", ref)
       .maybeSingle();
-    if (!pb || pb.status === "cancelled") { result.done++; continue; }
-    if (DONE.has(pb.status as string) || pb.portal_step === "door-code") { result.done++; continue; }
+    if (!pb || pb.status === "cancelled") { result.done++; return; }
+    if (DONE.has(pb.status as string) || pb.portal_step === "door-code") { result.done++; return; }
+    if (Number(pb.portal_link_reminders ?? 0) >= MAX_REMINDERS) { result.done++; return; }
 
     const portalUrl = (b.portal_url as string) || `https://guestportal.victorysuites.gi/guest/${pb.token}`;
     const first = (((b.payload as { customer?: { name?: string } })?.customer?.name) ?? String(b.guest_name ?? "").split(" ")[0] ?? "").trim();
     const text = reminderText(first, b.arrival_date as string, portalUrl);
 
     const sent = await sendGuestMessage({ bookingId: b.channex_booking_id as string, text });
-    if (!sent.ok) { result.failed++; if (sent.error) result.errors.push(`${ref}: ${sent.error}`); continue; }
+    if (!sent.ok) { result.failed++; if (sent.error) result.errors.push(`${ref}: ${sent.error}`); return; }
 
     const now = new Date().toISOString();
     await hub.from("inbound_bookings").update({ last_reminder_at: now }).eq("ota_reservation_code", b.ota_reservation_code as string);
@@ -92,5 +105,4 @@ export async function sendReminders(): Promise<ReminderResult> {
     await mirrorToYourFrontDesk({ channexBookingId: b.channex_booking_id as string }, { kind: "message", sender: "host", content: text });
     result.sent++;
   }
-  return result;
 }

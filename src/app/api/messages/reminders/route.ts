@@ -4,7 +4,7 @@ import { sendReminders } from "@/lib/reminders";
 import { runJob, enabled } from "@/lib/ops";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 /** Check in reminders, once a day at a civil hour. See src/lib/reminders.ts. */
 async function run(request: Request) {
