@@ -55,6 +55,10 @@
     {
       "path": "/api/cron/reconcile-cancels",
       "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/channex-rates/pull",
+      "schedule": "* * * * *"
     }
   ]
 }
