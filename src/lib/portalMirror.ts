@@ -2,6 +2,73 @@ import { createClient } from "@supabase/supabase-js";
 import { db } from "./db";
 import { roomsByProperty } from "./parkside";
 
+/** Rows per call to YourFrontDesk. One call for all of them ran close to the time limit; one call per row ran past it. */
+const MIRROR_CHUNK = 200;
+
+type MirrorTally = { inserted: number; existed: number; errors: string[] };
+
+/**
+ * Sends rows to YourFrontDesk so one row it cannot file costs only that row.
+ *
+ * YourFrontDesk inserts a call's new rows all or nothing and answers 500 with
+ * `inserted_before_error` when an insert fails. So from 3 Nov 2026 a single stay
+ * it could not hold (9.14: two stays under one reference, its unique key is flat
+ * plus reference) stopped every other new booking reaching it, every 15 minutes.
+ * On that one answer the call is split in two and retried until the bad row is
+ * alone and named; every other row goes through. Resending is harmless: YFD
+ * matches rows it already holds. Any other failure (auth, an outage) is not about
+ * a row, so it is reported without being retried a thousand times.
+ */
+async function postMirrorRows(
+  endpoint: string,
+  secret: string,
+  externalRef: string,
+  rows: { external_ref: string; room?: string }[],
+  out: MirrorTally,
+): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-channex-webhook-secret": secret },
+      body: JSON.stringify({ kind: "bookings", external_ref: externalRef, bookings: rows }),
+    });
+  } catch (e) {
+    out.errors.push(`YourFrontDesk unreachable (${rows.length} rows not sent): ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  const body = (await res.json().catch(() => ({}))) as { inserted?: number; existed?: number; error?: string; errors?: string[]; inserted_before_error?: number };
+  if (res.ok) {
+    out.inserted += body.inserted ?? 0;
+    out.existed += body.existed ?? 0;
+    if (body.errors?.length) out.errors.push(...body.errors);
+    return;
+  }
+  if (res.status === 500 && body.inserted_before_error !== undefined) {
+    if (rows.length > 1) {
+      const mid = Math.ceil(rows.length / 2);
+      await postMirrorRows(endpoint, secret, externalRef, rows.slice(0, mid), out);
+      await postMirrorRows(endpoint, secret, externalRef, rows.slice(mid), out);
+      return;
+    }
+    out.errors.push(`${rows[0].external_ref} on ${rows[0].room ?? "?"}: ${body.error ?? "insert failed"}`);
+    return;
+  }
+  out.errors.push(`YourFrontDesk ${res.status} (${rows.length} rows not sent): ${body.error ?? "no detail"}`);
+}
+
+async function fileMirrorRows(
+  endpoint: string,
+  secret: string,
+  externalRef: string,
+  rows: { external_ref: string; room?: string }[],
+  out: MirrorTally,
+): Promise<void> {
+  for (let i = 0; i < rows.length; i += MIRROR_CHUNK) {
+    await postMirrorRows(endpoint, secret, externalRef, rows.slice(i, i + MIRROR_CHUNK), out);
+  }
+}
+
 /**
  * Files in YourFrontDesk every guest portal booking on a flat the hub sells,
  * whatever road it came by, so Check ins and the Calendar show every guest.
@@ -29,14 +96,24 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
   const roomOf = new Map((flats ?? []).map((f) => [f.id as string, f.room_number as string]));
 
   const today = new Date().toISOString().slice(0, 10);
-  const { data: bookings, error } = await portal
-    .from("bookings")
-    .select("id, external_ref, property_id, kind, check_in, check_out, status, is_active, ota_status, created_at, ota_created_at, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
-    .in("property_id", [...roomOf.keys()])
-    .gte("check_out", today);
-  if (error) throw new Error(`Portal bookings: ${error.message}`);
+  // Paged: PostgREST caps a select at 1000 rows and these flats hold more, so an
+  // unpaged read silently left some bookings out of every sweep.
+  const bookings: Record<string, any>[] = [];
+  const portalIds = [...roomOf.keys()];
+  for (let offset = 0; ; offset += 1000) {
+    const { data: page, error } = await portal
+      .from("bookings")
+      .select("id, external_ref, property_id, kind, check_in, check_out, status, is_active, ota_status, created_at, ota_created_at, channel, booking_source, token, payment_link, portal_link_sent_at, balance_amount, deposit_amount, currency, num_guests, guest:guests(first_name, last_name, email, phone)")
+      .in("property_id", portalIds)
+      .gte("check_out", today)
+      .order("id", { ascending: true })
+      .range(offset, offset + 999);
+    if (error) throw new Error(`Portal bookings: ${error.message}`);
+    bookings.push(...(page ?? []));
+    if (!page || page.length < 1000) break;
+  }
 
-  const live = (bookings ?? []).filter((b) => b.is_active && b.status !== "cancelled");
+  const live = bookings.filter((b) => b.is_active && b.status !== "cancelled");
   const channelStay = new Set(
     live.filter((b) => !/^LH/i.test(String(b.external_ref ?? ""))).map((b) => `${b.property_id}|${b.check_in}|${b.check_out}`),
   );
@@ -51,7 +128,7 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
   const endpoint = (target.downstream_url as string).replace(/channex-webhook\/?$/, "channex-conversation");
 
   const batch = [];
-  for (const b of bookings ?? []) {
+  for (const b of bookings) {
     // Test rows are portal only and must never reach YourFrontDesk: it maps kind
     // "test" to guest, so e.g. TEST-WALK-2810 would show as a real guest stay.
     if (b.kind === "test") continue;
@@ -95,16 +172,7 @@ export async function mirrorPortalBookings(): Promise<{ considered: number; inse
       created_at: b.ota_created_at ?? b.created_at ?? null,
     });
   }
-  // One call for the lot: a call per booking ran past the time limit.
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-channex-webhook-secret": target.downstream_secret as string },
-    body: JSON.stringify({ kind: "bookings", external_ref: "batch", bookings: batch }),
-  });
-  const body = (await res.json().catch(() => ({}))) as { inserted?: number; existed?: number; error?: string };
-  if (!res.ok) out.errors.push(body.error ?? `YourFrontDesk ${res.status}`);
-  out.inserted = body.inserted ?? 0;
-  out.existed = body.existed ?? 0;
+  await fileMirrorRows(endpoint, target.downstream_secret as string, "batch", batch, out);
   return out;
 }
 
@@ -198,15 +266,7 @@ export async function mirrorPortalBookingsForRoom(room: string): Promise<{ consi
   if (!target?.downstream_url || !target.downstream_secret) { out.errors.push("No YourFrontDesk endpoint configured"); return out; }
   const endpoint = (target.downstream_url as string).replace(/channex-webhook\/?$/, "channex-conversation");
 
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-channex-webhook-secret": target.downstream_secret as string },
-    body: JSON.stringify({ kind: "bookings", external_ref: "staff-sync", bookings: batch }),
-  });
-  const body = (await res.json().catch(() => ({}))) as { inserted?: number; existed?: number; error?: string };
-  if (!res.ok) { out.errors.push(body.error ?? `YourFrontDesk ${res.status}`); return out; }
+  await fileMirrorRows(endpoint, target.downstream_secret as string, "staff-sync", batch, out);
   out.sent = batch.length;
-  out.inserted = body.inserted ?? 0;
-  out.existed = body.existed ?? 0;
   return out;
 }
